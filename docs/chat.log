@@ -1,0 +1,2308 @@
+# NSP-Extractor 작업 로그
+
+---
+
+## 세션 1: 2026-03-04 - 프로젝트 초기 설정 및 전체 구현
+
+### 배경
+- 과거 개발 이력 (`history/new_extension/`) 분석
+- Python + Playwright 서버 방식은 headless 봇 감지 → 429 에러 발생
+- 아이템스카우트 원본 확장 프로그램 (`history/itemscout/`) 분석
+- **결론**: 크롬 확장 프로그램으로 사용자 실제 브라우저 세션 활용
+
+### 아키텍처 결정 사항
+- MV3 (Manifest Version 3) 크롬 확장 프로그램
+- content_script.js: `document_start`에서 `fetch()` 인터셉트 설정
+- background.js: Service Worker로 탭 관리 및 데이터 집계
+- Python 서버 불필요 (과거 방식 폐기)
+
+### 핵심 데이터 추출 방법
+```
+1. fetch() 인터셉트 (document_start에서 설정)
+  → /n/v2/channels/{uid}/products/{id} API 응답 캡처
+  → saleAmount (recentSaleCount, weekSaleCount, cumulationSaleCount)
+  → stockQuantity, salePrice 등 전체 필드
+
+2. window.__PRELOADED_STATE__ 폴백
+  → API 응답 캡처 실패 시 페이지 초기 데이터 활용
+
+3. <script> 태그 DOM 파싱 폴백
+  → 최후 수단
+```
+
+### 과거 이력에서 얻은 교훈
+- `recentSaleCount = -1`: 네이버 정책으로 일부 상품 미공개 → `weekSaleCount`로 대체
+- content_script 타이밍 이슈: `document_start`에서 fetch 인터셉트 설정 필수
+- 탭 로드 후 추가 2초 대기: DOM 완전 렌더링 보장
+- 요청 간 1500ms 딜레이: 429 에러 방지
+
+### 작성 완료 파일
+- `ai-guideline.md` ✅
+- `README.md` ✅
+- `chat.log` ✅ (이 파일)
+- `extension/manifest.json` ✅
+- `extension/content_script.js` ✅
+- `extension/background.js` ✅
+- `extension/popup.html` ✅
+- `extension/popup.css` ✅
+- `extension/popup.js` ✅
+- `create_icons.py` ✅
+- 아이콘 생성 실행 ✅
+
+### 작성 완료 파일 (전체)
+- `ai-guideline.md` - cmd/conda 환경, API 전략, 연속성 규칙
+- `README.md` - 프로젝트 개요, 아키텍처, 사용법
+- `extension/manifest.json` - MV3, permissions: storage/tabs/scripting/downloads
+- `extension/content_script.js` - fetch+XHR 인터셉트, PRELOADED_STATE, DOM 폴백
+- `extension/background.js` - Service Worker, 탭 관리, CSV 빌드, 중단 기능
+- `extension/popup.html` - URL 입력, 진행바, 결과 테이블, 중단 버튼
+- `extension/popup.css` - 네이버 그린 테마 (#03c75a)
+- `extension/popup.js` - 이벤트, 진행 상황, 결과 렌더링
+- `extension/icons/icon16,48,128.png` - 직접 생성 완료
+- `create_icons.py` - stdlib만 사용하는 PNG 생성기
+
+### 다음 단계
+1. Chrome에서 `chrome://extensions/` → `extension/` 폴더 로드
+2. 네이버에 로그인된 상태 확인
+3. 팝업에 urls.txt 3개 URL 입력 → 수집 시작
+4. DevTools (F12) → Service Worker 콘솔에서 [BG] 로그 확인
+5. 결과 확인 및 디버깅 (특히 recentSaleCount 값)
+
+---
+
+## 세션 2: 2026-03-05 - 실패 원인 분석 및 전면 재설계
+
+### 문제 상황
+- 세션 1에서 만든 확장 프로그램을 실제 테스트 → URL 3개 모두 실패
+- 오류 메시지: `[NS] 타임아웃 - DOM 파싱 시도`
+- CSV 완전 비어있음
+
+### 실패 원인 분석
+- content_script의 fetch() 인터셉트가 네이버 페이지에서 동작하지 않음
+  - 네이버는 CSP/보안 정책으로 외부 스크립트의 fetch 인터셉트를 차단
+  - document_start 타이밍에도 네이버 내부 fetch가 먼저 완료되거나 차단됨
+
+### 핵심 발견: 아이템스카우트 background.js 역분석
+- `history/itemscout/background.js` (난독화된 원본) 분석 성공
+- **진짜 방식**: declarativeNetRequest 동적 규칙 + background에서 직접 API fetch
+  - `chrome.declarativeNetRequest.updateDynamicRules()` 로 동적 규칙 추가
+  - `Referer`, `sec-ch-ua`, `sec-fetch-site` 등 헤더를 실제 브라우저 값으로 설정
+  - `credentials: 'include'` 로 사용자 로그인 쿠키 포함
+  - background.js가 직접 Naver API 호출 (content_script 불필요)
+  - 규칙 ID: 21~30 범위 순환 사용
+- 아이템스카우트 content_script는 UI(iframe) 크기 조정 용도만 → 데이터 수집 없음
+
+### 수행한 작업
+1. `ai-guideline.md` 강화
+  - conda 환경 문제: 직접 경로 사용 (`<conda envs 경로>\main\python.exe`)
+  - chat.log 매 세션 기록 필수 규칙 추가
+  - Chrome 직접 실행 명령어 추가 (섹션 7)
+  - 아이템스카우트 역분석 인사이트 추가 (섹션 8)
+2. `manifest.json` v1.1.0 업데이트
+  - `declarativeNetRequest`, `declarativeNetRequestWithHostAccess` 권한 추가
+3. `background.js` 완전 재작성 (전체 교체)
+  - 구: 탭 열기 + content_script 응답 대기 방식
+  - 신: declarativeNetRequest 헤더 변조 + background 직접 API fetch
+  - Channel UID 획득 → 상품 API 호출 2단계 구조
+  - UA 정보 실시간 수집 (`navigator.userAgentData.getHighEntropyValues`)
+  - 규칙 ID 31~50 범위 사용 (아이템스카우트와 충돌 방지)
+4. `content_script.js` 단순화
+  - 데이터 수집 코드 전체 제거 → No-op 빈 파일로 변경
+
+### API 엔드포인트 확정
+- SmartStore Channel UID: `GET https://smartstore.naver.com/i/v1/smart-stores?url={slug}`
+- BrandStore Channel UID: `GET https://brand.naver.com/n/v1/channels?brandUrl={slug}`
+- SmartStore 상품: `GET https://smartstore.naver.com/i/v2/channels/{uid}/products/{id}?withWindow=false`
+- BrandStore 상품: `GET https://brand.naver.com/n/v2/channels/{uid}/products/{id}?withWindow=false`
+- 응답 필드: `saleAmount.recentSaleCount`, `saleAmount.recentWeekSaleCount`, `saleAmount.cumulationSaleCount`, `stockQuantity`, `salePrice`, `benefitsView.discountedSalePrice`
+
+### 미해결 문제
+- 실제 동작 테스트 미실시 (재설계 직후 → 다음 세션에서 확인 필요)
+- `declarativeNetRequest`의 `urlFilter`가 정확한 URL 매칭 규칙인지 검증 필요
+  - 와일드카드(`*`) 없이 전체 URL을 filter로 쓸 때 쿼리스트링 포함 여부 주의
+  - 실패하면 urlFilter 대신 `urlPrefix` 또는 도메인 수준 규칙으로 변경 고려
+- 네이버 로그인 세션 없을 때 API 응답 확인 필요 (401/403 처리)
+
+### 다음 단계
+1. Chrome에서 확장 프로그램 재로드 (기존 v1.0 제거 후 v1.1 재설치)
+2. DevTools → Service Worker 콘솔에서 [BG] 로그 확인
+3. 3개 URL 테스트: `<판매처A>`, `<판매처B>`, `<판매처C>`
+4. 실패 시: urlFilter 규칙 확인, 헤더 설정 디버깅
+
+---
+
+## 세션 3: 2026-03-04 - channelUid 획득 실패 수정 + 모바일 폴백 추가
+
+### 문제 상황 (테스트 결과)
+- SmartStore (<판매처C>): ✅ 성공 (`channelUid=<CHANNEL_UID_C>`, `recentSaleCount=?` 포함)
+- BrandStore (<판매처A>, <판매처B>): ❌ 실패 - `channelUid 획득 실패 (스토어 슬러그 확인 필요)`
+- CSV 부분 성공: <판매처C>만 데이터 채워짐
+
+### 실패 원인 분석
+- `https://brand.naver.com/n/v1/channels?brandUrl={slug}` API가 background Service Worker에서 null 반환
+- `declarativeNetRequest` urlFilter 매칭 문제 또는 브랜드스토어 API 응답 구조 차이 가능성
+- `mall.tsv`에 올바른 channelUid 값이 이미 존재함
+
+### 해결 방법
+1. **channels.json 생성**: mall.tsv → `extension/channels.json` (311개 판매처)
+  - Python 스크립트로 추출: `{storeSlug: {channelUid, isBrand}}`
+2. **3단계 폴백 로직** (background.js `getChannelUid` 개선):
+  - 1순위: 데스크탑 API (`brand.naver.com/n/v1/channels?brandUrl=`)
+  - 2순위: 로컬 캐시 (`chrome.runtime.getURL('channels.json')` → JSON 파싱)
+  - 3순위: 모바일 API (`m.brand.naver.com/n/v1/channels?brandUrl=`)
+3. **모바일 상품 API 폴백** (background.js `fetchProductData` 개선):
+  - 데스크탑 API 실패 시 `m.brand.naver.com/n/v2/channels/{uid}/products/{id}` 시도
+4. **manifest.json v1.2.0 업데이트**:
+  - host_permissions에 `m.smartstore.naver.com`, `m.brand.naver.com` 추가
+  - `web_accessible_resources`에 `channels.json` 등록
+
+### 수행한 작업 (파일별)
+- `extension/channels.json` ✅ 신규 생성 (311개 판매처 channelUid)
+- `extension/background.js` ✅ v1.2 - 3단계 폴백, 모바일 폴백 추가
+- `extension/manifest.json` ✅ v1.2.0 - 모바일 도메인 권한 + channels.json 등록
+
+### channels.json 업데이트 방법
+- `mall.tsv` 수정 후 Python으로 재생성:
+```
+<conda envs 경로>\main\python.exe -c "
+import csv, json
+result = {}
+with open('mall.tsv', encoding='utf-8') as f:
+    reader = csv.DictReader(f, delimiter='\t')
+    for row in reader:
+        slug = row.get('판매처ID', '').strip()
+        uid  = row.get('채널UID', '').strip()
+        is_brand = row.get('브랜드스토어여부', '').strip().upper() == 'TRUE'
+        if slug and uid:
+            result[slug] = {'channelUid': uid, 'isBrand': is_brand}
+with open('extension/channels.json', 'w', encoding='utf-8') as f:
+    json.dump(result, f, ensure_ascii=False, indent=2)
+"
+```
+
+### 미해결 문제
+- 실제 3단계 폴백 테스트 미실시 → 확장 프로그램 재로드 후 확인 필요
+- 데스크탑 channelUid API가 왜 실패하는지 정확한 원인 미규명
+  (urlFilter 매칭? CORS? 인증 문제?)
+- `recentSaleCount=-1` 처리 (네이버 정책상 일부 상품 미공개 정상)
+
+### 다음 단계
+1. Chrome 확장 프로그램 재로드 (v1.2.0)
+2. <판매처A>, <판매처B> 재테스트 → channels.json 캐시 히트 확인
+3. `[BG] channelUid(로컬캐시): <CHANNEL_UID_B>` 로그 확인
+4. 성공 시: 상품 데이터 필드 검증
+
+---
+
+## 세션 4: 2026-03-05 - recentSaleCount=-1 원인 분석 + Cookie 헤더 주입 (v1.3)
+
+### 문제 상황
+- v1.2 테스트 결과: BrandStore(<판매처A>, <판매처B>) 데이터 수집 자체는 성공
+- 그러나 `recentSaleCount=-1`로 수집됨
+- 아이템스카우트에서는 실제 값 표시:
+  - "오늘판매량 667건"
+  - "1주간판매량 118건"
+
+### 실패 원인 분석 (아이템스카우트 역분석)
+
+#### history/itemscout/background.js 재분석
+- `addNewRuleForUrl` 함수에서 **Cookie 헤더를 declarativeNetRequest 규칙에 명시적으로 주입**
+  ```javascript
+  { header: 'Cookie', operation: 'set', value: h[Math.floor(Math.random()*h.length)] }
+  ```
+  - `h[]`: 15개 이상의 하드코딩된 네이버 세션 쿠키 배열 (NID_SES, NNB 등)
+- 아이템스카우트 추가 헤더 패턴:
+  - `sec-fetch-storage-access: remove` (헤더 제거)
+  - `priority: u=1, i` (요청 우선순위 설정)
+  - channelUID 획득 후 `await s.wait(500)` 500ms 대기
+
+#### 핵심 발견
+- Service Worker에서 `credentials: 'include'`만으로는 쿠키가 declarativeNetRequest 규칙을 통해 제대로 전달되지 않음
+- **쿠키가 없는 상태 = 비로그인 요청** → 네이버 API가 `recentSaleCount=-1` 반환
+- `history/smartstore/PRELOADED_STATE.json`에서도 `"saleAmount": null` 확인
+  → PRELOADED_STATE에도 판매량 없음 → API 쿠키 인증이 반드시 필요
+
+### 해결 방법: chrome.cookies API로 실제 쿠키 주입
+
+아이템스카우트는 **하드코딩된 쿠키 배열**을 사용하지만, 우리는 `chrome.cookies.getAll()`로 **실제 브라우저 쿠키**를 읽어 주입 (더 안전하고 정확한 방법)
+
+```javascript
+// 1. chrome.cookies.getAll()로 naver.com 쿠키 수집
+const cookies = await chrome.cookies.getAll({ domain: 'naver.com' });
+const cookieStr = cookies.map(c => c.name + '=' + c.value).join('; ');
+
+// 2. declarativeNetRequest 규칙에 Cookie 헤더 명시 추가
+requestHeaders.push({ header: 'Cookie', operation: 'set', value: cookieStr });
+```
+
+### 수행한 작업 (파일별)
+
+#### extension/background.js → v1.3
+- `DELAY_MIN=800, DELAY_MAX=1800` 상수 추가
+- `COOKIE_CACHE_TTL=60000` 쿠키 캐시 TTL (1분)
+- `getNaverCookieString(domain)` 함수 신규 추가
+  - `chrome.cookies.getAll({ domain: 'naver.com' })` 호출
+  - 1분 캐시 적용 (`_naverCookieCache`, `_naverCookieCacheTime`)
+  - `[BG] 네이버 쿠키 획득: N개` 로그
+- `extractProduct()` 수정:
+  - 쿠키 미리 로드 후 `getChannelUid`에 전달
+  - channelUID 획득 후 `await sleep(500)` 대기 (아이템스카우트 패턴)
+  - 모바일 폴백 전 `await sleep(randomDelay())` 추가
+- `getChannelUid(storeType, storeSlug, uaInfo, cookieStr)` - cookieStr 파라미터 추가
+- `fetchChannelUidFromApi(..., cookieStr)` - cookieStr 파라미터 추가
+- `fetchProductData(..., cookieStr)` - cookieStr 파라미터 추가
+- `setDynamicRule(..., cookieStr)` 전면 재작성:
+  - `priority: u=1, i` 헤더 추가
+  - `sec-fetch-storage-access: remove` 헤더 제거
+  - `cookieStr` 존재 시 `Cookie` 헤더 명시 주입
+- `randomDelay()` 함수 신규 추가
+- 설치 로그 v1.3 업데이트
+
+#### extension/manifest.json → v1.3.0
+- `"cookies"` 권한 추가 (chrome.cookies.getAll() 사용에 필요)
+- version 1.2.0 → 1.3.0
+
+### 미해결 문제
+- 확장 프로그램 재로드 및 실제 테스트 미실시 → 다음 세션에서 확인 필요
+- cookies 권한 추가로 인해 Chrome이 재설치 또는 권한 승인 요청할 수 있음
+
+### 다음 단계
+1. Chrome `chrome://extensions/` → NSP-Extractor **새로고침(↻)**
+  - cookies 권한 추가로 재승인 필요할 수 있음
+2. 네이버에 로그인된 상태 확인 (필수!)
+3. Service Worker "검사" 클릭 → DevTools 콘솔 열기
+4. 3개 URL 재테스트:
+  - `https://brand.naver.com/<판매처A>/products/<상품코드A>`
+  - `https://brand.naver.com/<판매처B>/products/<상품코드B>`
+  - `https://smartstore.naver.com/<판매처C>/products/<상품코드C>`
+5. 기대 로그:
+  - `[BG] 네이버 쿠키 획득: N개` (N이 0이면 네이버 로그인 필요)
+  - `[BG] channelUid(로컬캐시): <CHANNEL_UID_A>`
+  - `recentSaleCount=양수값`
+6. 여전히 -1이면:
+  - 네이버 API가 해당 상품 판매량을 실제로 비공개 처리 가능성 검토
+  - Service Worker DevTools에서 실제 API 응답 JSON 확인 (`saleAmount` 필드)
+
+---
+
+## 세션 5: 2026-03-04 - addNewRuleForUrl 정확 재현 + saleAmount 재시도 (v1.4)
+
+### 문제 상황
+- v1.3 테스트 결과: 여전히 `recentSaleCount=?` (saleAmount 필드 자체가 없음)
+- 스크린샷: `[BG] OK ... → recentSaleCount=?`
+- 콘솔 로그: 데스크탑 API 429 → 모바일 폴백으로 성공은 하지만 saleAmount 없음
+
+### 심층 분석 결과
+
+#### 아이템스카우트 addNewRuleForUrl 전체 헤더 재분석
+```javascript
+// 실제 아이템스카우트 addNewRuleForUrl 헤더 목록 (난독화 해독)
+requestHeaders: [
+  { header: 'Accept', operation: 'set', value: 'application/json, text/plain, */*' },
+  { header: 'Accept-Encoding', operation: 'set', value: 'gzip, deflate, br, zstd' },
+  { header: 'Accept-Language', operation: 'set', value: 'ko,...' },
+  { header: 'Sec-Ch-Ua', operation: 'set', value: brands.map(e => '"브랜드";v="버전"').join(', ') },
+  { header: 'Sec-Ch-Ua-Mobile', operation: 'set', value: '?0' },
+  { header: 'sec-ch-ua-platform', operation: 'set', value: o.platform },  // ← 따옴표 없음!
+  { header: 'sec-fetch-site', operation: 'set', value: 'same-origin' },
+  { header: 'sec-fetch-mode', operation: 'set', value: 'cors' },
+  { header: 'sec-fetch-dest', operation: 'set', value: 'empty' },
+  { header: 'priority', operation: 'set', value: 'u=1, i' },
+  // REMOVE 목록 (우리 v1.3에서 누락):
+  { header: 'sec-fetch-user', operation: 'remove' },           // ← 누락
+  { header: 'cache-control', operation: 'remove' },            // ← 누락
+  { header: 'sec-fetch-storage-access', operation: 'remove' }, // ← v1.3에 있었음
+  { header: 'upgrade-insecure-request', operation: 'remove' }  // ← 누락
+]
+// ※ Cookie 헤더는 addNewRuleForUrl에 없음 (h[] 배열은 별도 목적)
+```
+
+#### 발견한 버그들 (v1.3에서)
+1. `sec-ch-ua-platform` 값에 `'"' + platform + '"'` 따옴표 추가 → 이중 따옴표 문제
+  - 아이템스카우트: `value: o.platform` (raw)
+  - 수정: `value: uaInfo.platform`으로 변경
+2. `sec-fetch-user`, `cache-control`, `upgrade-insecure-request` remove 누락
+  - 브라우저가 자동 추가하는 헤더들이 남아 네이버 API 요청에 영향 가능
+3. Cookie 헤더 주입은 유지 (아이템스카우트가 안 해도 우리가 하면 더 좋음)
+
+#### api.itemscout.io 서버 API 존재
+- `sale_count/list?mall_pid=...` 엔드포인트 발견
+- 아이템스카우트 자체 서버에서 판매량 집계 데이터 제공 가능성
+- 단, 아이템스카우트 계정 인증 토큰 필요 → 우리가 사용 불가
+
+#### getProductStat 처리 방식
+```javascript
+let c = i?.recentSaleCount ?? 0;
+if (c < 0) c = 0;  // 음수 → 0으로 표시 (우리는 -1 그대로 표시)
+```
+→ 아이템스카우트도 동일 API 사용, 단순히 음수를 0으로 치환해서 표시
+
+### 수행한 작업 (파일별)
+
+#### extension/background.js → v1.4
+- `setDynamicRule()` 헤더 목록 개선:
+  - `sec-ch-ua-platform`: `'"' + platform + '"'` → `uaInfo.platform` (따옴표 제거)
+  - `Sec-Ch-Ua` / `Sec-Ch-Ua-Mobile` 헤더명 대소문자 아이템스카우트와 일치
+  - `sec-fetch-user: remove` 추가
+  - `cache-control: remove` 추가
+  - `upgrade-insecure-request: remove` 추가
+- `extractProduct()` 에 saleAmount 재시도 로직 추가:
+  - 첫 응답에서 saleAmount 없거나 recentSaleCount < 0이면
+  - 3초 대기 후 데스크탑 API로 1회 재시도
+  - 재시도 성공 시 data 교체, 실패 시 원본 유지
+- 버전 주석 v1.4 업데이트
+- 설치 로그 v1.4 업데이트
+
+#### extension/manifest.json → v1.4.0
+- version 1.3.0 → 1.4.0
+
+### 핵심 인사이트
+- 아이템스카우트가 `recentSaleCount`를 가져오는 특별한 비법은 없음
+- 동일 API 사용, 단 헤더 패턴을 정확히 맞춰야 네이버 API가 saleAmount 반환
+- 네이버가 특정 조건(로그인 세션, 헤더 형식 등)에서만 saleAmount 필드를 포함하는 것으로 추정
+- saleAmount가 여전히 null이면: 네이버 정책상 해당 상품 판매량 비공개 처리
+
+### 다음 단계
+1. Chrome `chrome://extensions/` → NSP-Extractor **새로고침(↻)**
+2. 네이버 로그인 상태 확인
+3. 3개 URL 재테스트
+4. 기대 로그:
+  - `[BG] 데스크탑 상품API 실패: HTTP 429 → 모바일 시도` (정상 폴백)
+  - `[BG] saleAmount 누락/음수 → 3초 후 재시도` (재시도 발동)
+  - `[BG] 재시도 성공: recentSaleCount=N` 또는 `재시도도 saleAmount 없음 (네이버 비공개 처리)`
+5. 여전히 saleAmount null: 네이버 로그인 세션 확인 후 재테스트
+
+---
+
+## 세션 6: 2026-03-04 - addNewRuleForUrl 최종 재현 (v1.5)
+
+### 문제 상황
+- v1.4 테스트 결과: 여전히 `recentSaleCount=?`
+- 콘솔: `saleAmount 누락/음수 → 재시도도 saleAmount 없음`
+- `<판매처B>`: 데스크탑 API 성공 (429 없음)인데도 saleAmount 없음 → API 자체 응답에 필드 부재
+
+### 핵심 재발견: addNewRuleForUrl 실제 코드 (3번째 정밀 분석)
+
+세션 4에서 "Cookie 헤더 없음"이라고 잘못 분석했던 것을 수정:
+
+```javascript
+// 아이템스카우트 addNewRuleForUrl 실제 헤더 목록
+{ header: 'Sec-Ch-Ua',          value: brands.map(e => `"${e.brand}";v="${e.version}"`).join(', ') },
+{ header: 'Sec-Ch-Ua-Mobile',   value: '?0' },
+{ header: 'Sec-Ch-Ua-Platform', value: `"${n.platform}"` },   // ← 따옴표 포함!
+{ header: 'Sec-Fetch-Site',     value: 'same-origin' },
+{ header: 'Sec-Fetch-Mode',     value: 'cors' },
+{ header: 'Sec-Fetch-Dest',     value: 'empty' },
+{ header: 'Referer',            value: isBrand ?
+    `https://brand.naver.com/${storeSlug}/products/${productId}` :
+    `https://smartstore.naver.com/${storeSlug}/products/${productId}` },
+{ header: 'Cookie',             value: h[Math.floor(Math.random()*h.length)] }  // ← Cookie 있음!
+// condition:
+excludedInitiatorDomains: ['smartstore.naver.com', 'brand.naver.com']  // m. 없음
+```
+
+#### v1.4에서 잘못된 점들
+1. `Sec-Ch-Ua-Platform`: v1.3에서 따옴표 추가 → v1.4에서 제거 → **다시 추가해야 함**
+2. `sec-fetch-user/cache-control/upgrade-insecure-request remove` 추가 → **불필요, 제거**
+3. `excludedInitiatorDomains`에 m. 도메인 추가 → **제거**
+4. 헤더명 소문자/대소문자 혼재 → **아이템스카우트와 동일한 대소문자로 통일**
+
+### 수행한 작업
+
+#### extension/background.js → v1.5
+- `setDynamicRule()` 최종 수정:
+  - `Sec-Ch-Ua-Platform`: `'"' + platform + '"'` (따옴표 포함) 복원
+  - `sec-fetch-user/cache-control/upgrade-insecure-request/sec-fetch-storage-access` remove 항목 제거
+  - `excludedInitiatorDomains`: m. 도메인 제거 → `['smartstore.naver.com', 'brand.naver.com']`만
+  - 헤더명 대소문자 아이템스카우트와 일치 (`Sec-Fetch-Site`, `Sec-Fetch-Mode` 등)
+- 디버그 로그 추가: `saleAmount raw:` JSON 출력 (API 실제 응답 확인용)
+- 버전 v1.5 업데이트
+
+#### extension/manifest.json → v1.5.0
+
+### 디버그 로그 (다음 테스트 시 확인 필요)
+```
+[BG] saleAmount raw: null       ← saleAmount 필드 자체 없음
+[BG] saleAmount raw: {"recentSaleCount":-1,...}  ← 필드는 있으나 비공개
+[BG] saleAmount raw: {"recentSaleCount":667,...} ← 성공
+```
+
+### 미해결 문제
+- v1.5 실제 테스트 미실시
+- 근본 원인이 헤더 형식인지 쿠키인지 불명확 → 디버그 로그로 확인 필요
+
+### 다음 단계
+1. Chrome 확장 프로그램 재로드 (v1.5.0)
+2. 3개 URL 테스트
+3. DevTools에서 `[BG] saleAmount raw:` 로그 확인
+4. 여전히 실패 시: 네이버 상품 페이지 직접 열어 DevTools Network 탭에서 실제 API 응답 JSON 확인
+
+---
+
+## 세션 7: 2026-03-04 - saleAmount 근본 원인 완전 규명
+
+### 배경
+- v1.5 콘솔 로그: `saleAmount raw: undefined` (모든 상품)
+- 사용자가 모바일 API 성공 Python 코드 제공 (실제 쿠키 포함)
+- 사용자가 <판매처D> URL 추가 (오늘 44명 구매 확인됨)
+
+### 핵심 발견: saleAmount 완전 부재 확인 (Python 직접 테스트)
+
+```python
+# 모바일 API - <판매처B>, 실제 네이버 쿠키 포함, 올바른 헤더 모두 포함
+requests.get('https://m.brand.naver.com/n/v2/channels/<CHANNEL_UID_B>/products/<상품코드B>?withWindow=false', headers=...)
+# → status: 200, saleAmount key present: False
+```
+
+**결론**: 네이버가 공개 API에서 `saleAmount` 필드를 완전히 제거했음.
+쿠키, 헤더, 인증 여부와 무관. 서버 측 정책적 결정.
+
+### 아이템스카우트 판매량 출처 완전 해명
+
+```javascript
+// itemscout background.js - API 라우트 정의
+sale_count: {
+  list(e) {
+    let t = "";
+    for (const a of e) t += `mall_pid=${a}&`;
+    return "sale_count/list?" + t;
+  }
+}
+// → https://api.itemscout.io/api/sale_count/list?mall_pid=<상품코드X>&...
+```
+
+```javascript
+// product_analysis.js - UI 렌더링
+null == s?.recentSaleCount || null == s?.cumulationSaleCount
+  ? addCommaToNumber(f)   // ← f = api.itemscout.io/sale_count/list 에서 온 값
+  : addCommaToNumber(s.recentSaleCount)  // s = 네이버 API saleAmount (이제 없음)
+```
+
+- 아이템스카우트는 자체 서버(`api.itemscout.io`)에서 판매량 집계 데이터 제공
+- 스크린샷의 "예상판매량(7일) 384건" = itemscout 서버 데이터 (복제 불가)
+- 네이버 API saleAmount가 있을 때는 그걸 우선 사용, 없으면 자체 서버 사용
+
+### 탐색한 대안 API들 (모두 실패)
+
+| API | 결과 | 이유 |
+|-----|------|------|
+| marketing-message | 204 No Content | 데이터 없음 |
+| 쇼핑 검색 API v2 | 404 | 경로 변경 |
+| PRELOADED_STATE | saleAmount=null | 동일 |
+| product stat/stats | 404 | 없는 API |
+
+### PRELOADED_STATE 분석 결과
+- `m.brand.naver.com` 상품 페이지 HTML → 200 성공 (리다이렉트: brand.naver.com)
+- `product.A.saleAmount = null` (키는 있으나 null)
+- 저장 파일: `history/smartstore/PRELOADED_STATE_m_brand.json`
+
+### 추가 작업
+- `history/products/urls.txt`에 <판매처D> URL 추가
+- Python 테스트 스크립트 작성:
+  - `test_mobile_api.py` - 모바일 API 응답 구조 확인
+  - `test_sale_count.py` - 대안 API 탐색
+  - `test_preloaded_state.py` - PRELOADED_STATE 파싱
+  - `test_shopping_api.py` - 쇼핑 검색 API 탐색
+  - `analyze_preloaded_state.py` - PRELOADED_STATE 전체 분석
+  - `test_marketing_msg.py` - marketing-message API 테스트
+
+### 현재 상태
+- 판매량(saleAmount)은 네이버 공개 API에서 **영구적으로 불가**
+- 나머지 데이터(가격, 재고, 리뷰, 카테고리 등)는 정상 수집 중
+- 확장 프로그램 v1.5는 가격/재고/리뷰 수집에는 완전히 동작함
+
+### 다음 단계 (선택)
+1. **판매량 포기**: 오늘판매량/1주간/6개월 컬럼을 삭제하거나 N/A로 고정
+2. **대안 데이터**: 리뷰수/평점/재고를 주요 지표로 활용
+3. **아이템스카우트 공식 API**: 유료 구독 후 `api.itemscout.io` 직접 사용 (복잡)
+
+---
+
+## 세션 9: 2026-03-04 - v2.0 구현 (itemscout DOM 판매량 파싱)
+
+### 작업 내용
+- saleAmount 완전 제거, itemscout DOM 파싱 방식으로 전환 (v2.0)
+- background.js: 탭 열기 → content_script 메시지 → 판매량 수집 흐름 구현
+- content_script.js: itemscout 컨테이너/스피너 폴링 + 판매량 텍스트 파싱
+- popup.js/html: 판매량 컬럼 1개(itemscout)로 통합
+- manifest.json: v2.0.0, run_at: document_end
+
+### 발견한 문제
+1. `active: false` 탭 → itemscout content_script 미주입 → `iframe_not_found`
+2. captcha 오탐: `checkCaptchaInTab()`이 정상 페이지도 captcha로 판정 → 90초 무한 대기
+
+### 해결 (v2.1)
+- `active: true` 탭으로 변경
+- captcha 체크 → 오류 발생 시에만 확인
+- 고정 PAGE_LOAD_WAIT 제거 → `.animate-spin` 스피너 폴링으로 대체
+
+### 미해결 문제 (v2.2에서 디버깅 중)
+- 판매량 컬럼 여전히 빈값 → itemscout이 실제로 어떤 DOM 요소를 삽입하는지 미확인
+- `container_not_found` 또는 `sale_text_not_found` 원인 불명
+- **v2.2에서 DOM 스냅샷 디버그 기능 추가**: 탭 로드 3초 후 `debugDom` 액션으로 DOM 구조 캡처
+
+### 다음 단계
+1. 확장 재로드 후 URL 1개 테스트
+2. Service Worker 콘솔에서 `[BG][DEBUG] DOM 스냅샷:` 확인
+3. itemscout 실제 selector 파악 후 content_script.js selector 수정
+
+### 세션 9 업데이트: DOM 스냅샷 결과 분석
+
+**확인된 사실:**
+- itemscout은 `#its-product-analysis` **iframe** 을 페이지에 삽입
+- iframe src: `chrome-extension://.../product_analysis/product_analysis.html`
+- iframe `innerTextSlice: ""` → content_script에서 contentDocument 접근 불가 (cross-origin)
+- `#product-analysis-container` div는 없음 → 모든 데이터가 iframe 내부에만 존재
+- `bodyHasBuy: true` → 페이지 본문의 "구매" 텍스트는 다른 UI (장바구니 버튼 등)
+
+**v2.2 시도 및 실패:**
+- `webNavigation.getAllFrames` → `chrome-extension://` 프레임의 URL을 반환하지 않음
+- `scripting.executeScript({ frameIds })` → `product_analysis` 프레임을 찾지 못해 모두 timeout
+
+---
+
+## 세션 9 Phase 4: api.itemscout.io 직접 호출 방식 (v2.1)
+
+### 근본 원인 재분석
+- `product_analysis.js` 소스 확인: iframe이 판매량을 `api.itemscout.io/api/sale_count/list?mall_pid={productId}` API에서 가져옴
+- `webNavigation.getAllFrames`는 `chrome-extension://` URL 프레임의 URL을 빈 문자열로 반환 → 프레임 찾기 불가
+- `scripting.executeScript`로 `chrome-extension://` 프레임 접근 불가 (다른 확장 보안 정책)
+- 이 모든 DOM 파싱 접근법은 근본적으로 막혀 있음
+
+### 최종 해결 방법: api.itemscout.io 직접 호출
+- `chrome.cookies.getAll({ domain: 'itemscout.io' })`로 itemscout 세션 쿠키 획득
+- `declarativeNetRequest`로 Referer=https://itemscout.io/, Cookie 헤더 주입
+- `https://api.itemscout.io/api/sale_count/list?mall_pid={productId}` 직접 호출
+- 응답 파싱: `{ data: [{ mall_pid, sale3, sale7, sale30 }] }`
+  - sale3 → todayCount(3일), sale7 → weekCount(7일), sale30 → minCount(30일)
+  - 대표값 우선순위: sale7 > sale3 > sale30
+
+### 변경 파일 (v2.1)
+- `extension/background.js`:
+  - `collectItemscoutSaleCount(productUrl, productId)` 완전 재작성 (탭 열기 없음)
+  - `getItemscoutCookieString()` 신규 추가 (itemscout.io 쿠키 캐시)
+  - `setItemscoutApiRule(ruleId, itsCookieStr)` 신규 추가
+  - `parseItemscoutSaleCountResponse(json, productId)` 신규 추가
+  - 제거: pollItemscoutIframe, extractSaleTextFromFrame, parseSaleText, waitForTabLoad, checkCaptchaInTab, sendMessageToTab
+  - buildProductResult 레이블: '예상7일' / '예상3일' / '예상30일'
+- `extension/manifest.json` v2.1.0:
+  - host_permissions에 `https://api.itemscout.io/*`, `https://itemscout.io/*` 추가
+  - permissions에서 `webNavigation` 제거
+
+### 핵심 리스크
+- itemscout.io에 로그인된 쿠키가 없으면 `data: []` 반환 → 판매량 null (no_data)
+- 이전 세션 8에서 쿠키 없이 호출 시 data: [] 확인됨 → 쿠키 인증이 필수
+
+### 다음 단계
+1. Chrome 재로드: chrome://extensions/ → NSP-Extractor ↻
+2. itemscout.io 로그인 확인 (아이템스카우트 확장 프로그램이 활성화된 상태)
+3. Service Worker 콘솔에서 로그 확인:
+  - `[BG] itemscout 쿠키: 있음` ← 이게 나와야 함
+  - `[BG] itemscout API 응답 데이터: {"data":[{"mall_pid":"...","sale7":192,...}]}`
+  - `[BG] 판매량 수집 결과: {"weekCount":192,...}`
+
+---
+
+## 세션 기록 템플릿
+
+```
+## 세션 N: YYYY-MM-DD - [작업 제목]
+
+### 작업 내용
+- ...
+
+### 발견 사항
+- ...
+
+### 해결한 문제
+- ...
+
+### 미해결 문제
+- ...
+
+### 다음 단계
+- ...
+```
+
+---
+
+## 세션 10: 2026-03-05 - 아이템스카우트 제거 및 단순화 (v2.2)
+
+### 작업 내용
+- 아이템스카우트 판매량 파싱/호출 기능 완전 제거
+- 네이버 상품 API에서 가져올 수 있는 항목만 수집하도록 단순화
+- 오류 발생 시 캡챠 감지 → 30초 해결 대기 → 미해결 시 5분 뒤 재시도 로직 추가
+- 팝업 테이블에서 판매량 컬럼 제거
+
+### 변경 파일
+- `extension/background.js`
+  - itemscout 관련 함수/필드 제거
+  - `extractProductWithRetry()` 및 캡챠 대기/재시도 로직 추가
+  - CSV 컬럼에서 판매량 제거
+- `extension/popup.html`, `extension/popup.js`
+  - 판매량 컬럼 및 렌더링 제거
+- `extension/manifest.json`
+  - version 2.2.0, description 단순화
+  - itemscout host_permissions 및 content_scripts 제거
+
+### 발견 사항
+- `/channels/` API 호출은 현재 background.js에서 직접 수행 중
+- 페이지 네트워크 로그를 직접 가로채는 방식은 CSP/타이밍 이슈로 불안정 → background fetch 유지
+
+### 다음 단계
+1. Chrome 확장 프로그램 재로드 (v2.2.0)
+2. 캡챠 발생 시 30초 내 수동 해결 확인
+3. 실패 URL이 5분 후 재시도되는지 로그 확인
+
+### 추가 변경 (2026-03-05)
+- 캡챠 판정 기준을 `captcha.html` 기준으로 업데이트
+  - `#captcha_wrap`, `#rcpt_form`, `#vcpt_form`, `#cpt_confirm` 요소 또는 `input[name="captcha"]` 탐지
+- 정상 페이지 판정은 `meta[property="og:title"]` + URL `/products/` 여부로 확인
+- 재시도 정책: 동일 URL 최대 3회, 실패 시 최종 error 처리
+
+### 추가 변경 (2026-03-05, PRELOADED_STATE 우선)
+- 상품 페이지 HTML에서 `window.__PRELOADED_STATE__` 먼저 파싱
+- `channelUid`, `channelId`, `stockQuantity`는 PRELOADED_STATE에서 우선 확보
+  - stockQuantity는 3개 후보 중 값이 있는 첫 항목 사용
+- PRELOADED_STATE에 channelUid가 없을 때만 `/channels/` API 호출
+- CSV에 `ChannelUid`, `ChannelId` 컬럼 추가
+
+---
+
+## 세션 11: 2026-03-05 - 삭제/판매중지/품절 상태 감지 (v2.2 → v2.3)
+
+### 배경
+- 사용자 테스트 결과(CSV 5회 연속) — 특수 상태 감지 전혀 안 됨:
+  - `<판매처E>` (삭제된 상품) → `error` (정상: `deleted`)
+  - `<판매처F>` (판매중지) → `success` (정상: `paused`)
+  - `<판매처G>` (품절) → `success` (정상: `soldout`)
+- 이전 세션에서 `SpecialStatusError` 클래스 상단 이동, `fetchPreloadedInfo` 수정 등 다수 시도
+- 사용자 극도로 불만: "확장프로그램 삭제하고 크롬 재시작까지 했는데 여전히 동일"
+
+### 근본 원인 파악 (최종)
+
+#### 1. `fetchPreloadedInfo`가 실패해도 문제없었던 이유
+- `fetchProductHtml(productUrl)`이 Service Worker에서 스마트스토어 URL을 fetch하면:
+  - **네이버가 캡챠 페이지를 반환** (fetch_webpage 도구로 직접 확인)
+  - 또는 SSR HTML이 아닌 SPA 쉘 반환 → PRELOADED_STATE 없음
+  - 결과: `extractPreloadedState(html) = null`, `detectSpecialStatusFromHtml` 미감지
+  - `fetchPreloadedInfo`는 예외 없이 `null` 반환
+- `null` 반환 후: API 호출 진행 → paused/soldout에서 **HTTP 200 + 완전한 JSON 반환**
+- `buildProductResult`는 무조건 `status: 'success'` → 잘못된 결과
+
+#### 2. deleted 상품 (<판매처E>)
+- API가 **HTTP 204 (빈 응답)** 반환
+- 기존 코드: `throw new Error('상품 데이터 획득 실패: 상품 API 빈 응답 (HTTP 204)')`
+- 이게 일반 에러로 처리되어 `status: 'error'`
+- `SpecialStatusError`로 변환하지 않음
+
+#### 3. paused/soldout API 응답 JSON 구조 확인
+- `product-paused.html` PRELOADED_STATE 분석: `simpleProductForDetailPage.A.productStatusType = "SUSPENSION"`
+- 네이버 상품 API (`/v2/channels/{uid}/products/{id}`) 응답에도 **`productStatusType` 필드 포함**
+  - paused: `"productStatusType": "SUSPENSION"`
+  - soldout: `"productStatusType": "OUTOFSTOCK"`
+- 기존 코드에서 이 필드를 전혀 체크하지 않음!
+
+### 해결 (v2.3)
+
+#### 핵심 수정: `extractProduct()`에 API 응답 상태 감지 추가
+
+```javascript
+// 삭제된 상품: 4단계 API 전부 실패 시
+if (!apiData) {
+  if (apiErr.includes('204') || apiErr.includes('빈 응답')) {
+    throw new SpecialStatusError('deleted', productUrl, preloadedInfo);
+  }
+  throw new Error('상품 데이터 획득 실패: ' + apiErr);
+}
+
+// ... PRELOADED_STATE 보완 ...
+
+// API 응답의 productStatusType으로 특수 상태 감지 (핵심!)
+const apiProductStatus = apiData.productStatusType || null;
+const apiSpecialStatus = detectSpecialStatusFromType(apiProductStatus);
+if (apiSpecialStatus) {
+  const mergedData = {
+    channelUid, channelId, mallNo, brandId, brandName, storeName,
+    productStatusType: apiProductStatus, stockQuantity,
+    name, salePrice, productNo  // 추가 정보도 보존
+  };
+  throw new SpecialStatusError(apiSpecialStatus, productUrl, mergedData);
+}
+```
+
+#### Queue loop 핸들러 개선
+- `SpecialStatusError.data`에서 `productNo`, `name`, `salePrice` 추가 활용
+- `const d = err.data` (변수명 정리)
+
+### 동작 흐름 (수정 후)
+
+| 상품 | `fetchPreloadedInfo` | API 응답 | 최종 처리 |
+|------|---------------------|----------|-----------|
+| 정상 상품 | null 또는 info | HTTP 200, productStatusType=null | `buildProductResult` → `status: 'success'` |
+| paused | null (캡챠/SPA) | HTTP 200, productStatusType=**SUSPENSION** | `SpecialStatusError('paused')` throw → `status: 'paused'` ✅ |
+| soldout | null (캡챠/SPA) | HTTP 200, productStatusType=**OUTOFSTOCK** | `SpecialStatusError('soldout')` throw → `status: 'soldout'` ✅ |
+| deleted | null (캡챠/SPA) | HTTP 204 → 모든 4단계 실패, `apiErr='빈 응답'` | `SpecialStatusError('deleted')` throw → `status: 'deleted'` ✅ |
+
+### 변경 파일
+
+#### extension/background.js
+- `extractProduct()` 수정:
+  - `if (!apiData)` 블록: `apiErr.includes('204') || apiErr.includes('빈 응답')` → `SpecialStatusError('deleted')` throw
+  - PRELOADED_STATE 보완 후 `apiData.productStatusType` 체크 → `SpecialStatusError` throw
+  - `mergedData` 객체: channelUid/channelId/mallNo/brandId/brandName/storeName/productStatusType/stockQuantity/name/salePrice/productNo
+- Queue loop `SpecialStatusError` 핸들러:
+  - `const preloaded` → `const d` (변수명 정리)
+  - `productNo`, `name`, `salePrice` 필드 활용
+
+#### extension/manifest.json
+- version 2.2.0 → 2.3.0
+
+### 왜 이전에 못 고쳤나
+- 이전 접근: `fetchPreloadedInfo(HTML fetch) → detectSpecialStatusFromHtml` 방식에 집착
+- HTML fetch는 Service Worker에서 **네이버 캡챠 반환**으로 원천 불가
+- **API 응답 자체에 `productStatusType` 필드가 있다는 것을 간과**
+- 이번에 `fetch_webpage` 도구로 직접 URL을 fetch해서 캡챠 반환 확인 → 방향 전환
+
+### 다음 단계
+1. Chrome `chrome://extensions/` → NSP-Extractor **새로고침(↻)** (v2.3.0으로 업데이트됨)
+2. 3개 특수 URL 테스트:
+  - `https://smartstore.naver.com/<판매처E>/products/<상품코드E>` → 기대: `status: deleted`
+  - `https://brand.naver.com/<판매처F>/products/<상품코드F>` → 기대: `status: paused`
+  - `https://brand.naver.com/<판매처G>/products/<상품코드G>` → 기대: `status: soldout`
+3. Service Worker 콘솔에서 확인:
+  - `[BG] API 응답 productStatusType=SUSPENSION → paused: ...`
+  - `[BG] API 빈 응답(204) → deleted 판정: ...`
+  - `[BG] 특수 상태(paused) 최종 저장: ...`
+4. CSV에서 status 컬럼 확인
+
+---
+
+## 세션 12: 2026-03-05 - 대량 처리 개선 (v2.4) + 내보내기 옵션
+
+### 작업 내용
+
+#### Phase 1: 대량 처리 3가지 개선 (동일 세션 앞부분)
+1. **프록시 IP 자동 교체**: 설정에서 IP:포트:아이디:비밀번호 목록 등록, 캡챠 감지 시 자동 로테이션
+2. **즉시 중단**: stopCollection 시 isRunning:false 즉시 설정 + 현재까지 결과 반환
+3. **파일 입력**: input[type=file]로 .txt 파일 업로드, 기본 파일 설정 시 자동 로드
+
+#### Phase 2: 내보내기 옵션
+4. **포맷 선택**: 설정 탭 → CSV / JSON 라디오 버튼
+5. **자동 내보내기**: 수집 완료 시 자동 저장 토글 + 파일 이름 접두어 (예: 네이버상품_20260305125530.csv)
+6. **null 오류 수정**: 중단 후 내보내기 시 null 항목으로 TypeError 발생 → filter(Boolean) 방어 처리
+
+### 해결한 문제
+
+#### 내보내기 실패: Cannot read properties of null (reading 'productNo')
+- 원인: 중단 시 처리되지 않은 results 슬롯이 null로 남음 → buildCSV에서 item.productNo 접근 → TypeError
+- 수정: exportData 케이스, buildCSV 내부, startCollection 완료 후 filter(Boolean) 3곳 추가
+
+### 변경 파일
+- background.js: exportData 케이스(CSV/JSON), buildTimestamp(), 자동 내보내기, saveExportSettings/getExportSettings
+- popup.html: 설정 탭에 내보내기 설정 섹션 (라디오, 토글, prefix 입력)
+- popup.js: exportBtn → exportData, loadSettingsTab 내보내기 로드, saveExportBtn 이벤트
+- popup.css: .settings-row, .radio-label, .input-text 추가
+
+### 다음 단계
+1. chrome://extensions/ → NSP-Extractor 새로고침 (v2.4.0)
+2. 설정 탭 → 내보내기 설정 저장 후 수집 테스트
+3. 중단 후 내보내기 오류 없는지 확인
+
+---
+
+## 세션 13: 2026-03-05 - Service Worker 오류 알림 제거
+
+### 작업 내용
+- **SpecialStatusError 로그 레벨 변경**: 삭제/중지/품절 상품 감지 시 발생하던 `console.error`를 `console.log`로 변경
+- **목적**: 크롬 확장 프로그램 관리 페이지(`chrome://extensions/`)에서 빨간색 "오류" 알림이 불필요하게 표시되는 현상 제거 (비즈니스 로직상 예상된 예외이므로)
+
+### 해결한 문제
+- 상품 수집은 정상이나, 삭제된 상품 등을 만날 때마다 확장 프로그램 아이콘에 빨간색 오류 숫자가 쌓이는 UX 문제 해결
+
+### 변경 파일
+- `extension/background.js`: `extractProduct` catch 블록에서 `instanceof SpecialStatusError` 체크 로직 추가
+
+---
+
+## 세션 14: 2026-03-05 - 필드 파싱 수정 + 신규 필드 추가 + 프록시 교체주기 + UI 개선
+
+### 작업 내용 요약
+
+#### 1. 신규 필드 추가 (세션 13-14 연속 작업)
+- `channelName`: `channel.channelName` (채널명, 스토어 이름)
+- `categoryId`, `categoryName`: 상품의 카테고리 ID/명칭
+- `wholeCategoryId`, `wholeCategoryName`: 전체 카테고리 경로
+- `deliveryType`: `productDeliveryInfo.deliveryAttributeType` (배송속성, 예: NORMAL)
+
+#### 2. 필드명 전면 개편
+기존 → 신규 매핑:
+- `productNo` → `productId`
+- `storeName` → `mallName`
+- `name` → `productName`
+- `salePrice` → `price`
+- `discountedSalePrice` → `salesPrice`
+
+#### 3. CSV/JSON 출력 구조 변경
+- `CSV_COLUMNS` 배열 도입: `[한글헤더, 영문키]` 쌍 배열
+- CSV는 한글 헤더, JSON은 영문 키 사용
+- `soldout` 필드는 CSV에서 `Y`/`N`으로 출력
+- 컬럼 순서: 상품코드, 판매처순번, 판매처명, 채널ID, 채널명, 브랜드ID, 브랜드명, 카테고리ID, 카테고리, 상품명, 판매가, 할인가, 재고수량, 리뷰수, 평점, 품절여부, 상태, 배송속성, 전체카테고리ID, 전체카테고리, 상품주소, 채널UID, 오류메시지, 수집시간
+
+#### 4. mallSeq/channelNo 파싱 버그 수정
+- **원인**: API 응답 `channel` 객체의 channelId 필드명이 `id`가 아닌 `channelNo` (예: `"channelNo":<CHANNEL_ID_A>`)
+- **원인**: mallNo 필드명이 API 최상위에 `mallSeq`로 존재 (`"mallSeq":<MALL_SEQ_B>`)
+- **수정 위치**:
+  - `buildProductResult`: `ch.channelNo || ch.id || ch.channelId` 순서로 폴백 추가, `data.mallSeq || ch.mallSeq` 폴백 추가
+  - `pickPreloadedInfo`: `channelObj?.channelNo || channelObj?.id` 순서로 수정
+- **데이터 출처**: `product-brand.html` PRELOADED_STATE의 `simpleProductForDetailPage.A.channel` 구조 확인
+
+#### 5. 내보내기 설정 자동 저장
+- 기존: 설정 변경 후 "💾 저장" 버튼 클릭 필요
+- 변경: 파일형식 라디오, 자동저장 토글, 파일명접두어 입력 변경 시 즉시 자동 저장
+- `saveExportSettings()` 공통 함수 추출, 각 입력 필드에 `change`/`input` 이벤트 리스너 추가
+- 저장 버튼은 UI 피드백(예시 파일명 표시)용으로 유지
+
+#### 6. 프록시 교체주기 설정 추가 (기존 오류 교체만 있던 것 확장)
+- **반복교체주기**: N번 요청마다 프록시 IP 자동 교체 (0이면 비활성)
+- **오류교체주기**: N번 오류 발생 시 프록시 IP 교체 (기존 기능 유지)
+- 두 조건 중 먼저 충족되는 것으로 교체
+- 프록시 1개일 경우 교체 불가 → 카운터만 리셋, 무시
+- `_proxyRotateInterval`, `_proxyErrorThreshold`, `_proxyRequestCount`, `_proxyErrorCount` 변수 추가
+- `loadProxyConfig` / `saveProxyConfig` / `switchToNextProxy` / `getProxyStatus` 모두 업데이트
+- `proxyConfig` storage 구조: `{ enabled, proxies, rotateInterval, errorThreshold }`
+- 설정 탭 UI: "교체주기 설정" 섹션 추가 (반복교체주기 숫자 입력, 오류교체주기 숫자 입력)
+
+#### 7. 팝업에서 현재 프록시 IP 표시
+- 수집 중(프로그레스 섹션 내): 기존 `.proxy-status` div 유지
+- **신규**: 수집 탭 액션 버튼 아래에 `.proxy-active-badge` 항상 표시 (수집 중/대기 무관)
+  - `🌐 프록시 N/M: IP:PORT | 반복교체: X/N | 오류: X/N` 형식
+  - 프록시 비활성 시 숨김
+- `refreshProxyActiveBadge()` 함수: 팝업 열릴 때, 수집탭 전환 시, 프록시 저장 시 호출
+- `updateProxyActiveBadge(pxRes)` 함수: polling 루프에서도 1초마다 갱신
+
+### 핵심 설계 결정
+
+#### mallSeq 위치 파악 과정
+- `product-brand.html` grep으로 확인: `"mallSeq":<MALL_SEQ_B>`는 스토어 계정 정보 최상위에 있음
+- PRELOADED_STATE의 channel 객체(`simpleProductForDetailPage.A.channel`)에는 mallSeq가 없음
+- API 응답(`/v2/channels/.../products/...`)에 `mallSeq` 최상위 필드가 있을 것으로 추정
+- `buildProductResult`에서 `data.mallNo || data.mallSeq || ch.mallSeq` 순서로 폴백
+
+#### channelNo 위치 파악 과정
+- PRELOADED_STATE: `"channel":{"channelNo":<CHANNEL_ID_A>,...}` (id 필드 없음, channelNo 사용)
+- 기존 코드가 `channelObj?.id`로 읽어서 항상 빈값 반환
+- 수정: `channelObj?.channelNo || channelObj?.id || channelObj?.channelId` 순서
+
+#### 자동 저장 전략
+- `input` 이벤트(prefix)는 타이핑 중마다 호출되므로 storage 쓰기가 잦음
+- 해결 방안 미적용 (chrome.storage.local은 비동기 + 빠르므로 실용적으로 문제없음)
+- debounce 추가는 향후 필요 시 검토
+
+### 변경 파일 목록
+- `extension/background.js`:
+  - `buildProductResult`: `channelId`, `mallNo` 파싱 필드명 수정
+  - `pickPreloadedInfo`: `channelId` 추출을 `channelNo` 우선으로 변경
+  - 프록시 관련 변수 4개 추가, `loadProxyConfig`, `switchToNextProxy`, `saveProxyConfig`, `getProxyStatus` 업데이트
+  - startCollection 큐 루프: 반복교체주기/오류교체주기 체크 로직 추가
+- `extension/popup.html`:
+  - 설정 탭 프록시 섹션에 "교체주기 설정" 추가 (proxyRotateInterval, proxyErrorThreshold 입력)
+  - 수집 탭 액션 버튼 아래 `proxyActiveBadge` div 추가
+- `extension/popup.js`:
+  - `proxyRotateInterval`, `proxyErrorThreshold`, `proxyActiveBadge`, `proxyActiveBadgeText` DOM 참조 추가
+  - `loadSettingsTab`: 교체주기 값 로드 추가
+  - `saveProxyBtn`: `rotateInterval`, `errorThreshold` 포함하여 저장
+  - `saveExportBtn` 로직 분리: `saveExportSettings()` 공통 함수 + 자동 저장 이벤트 리스너
+  - `showProxyBadge` → `refreshProxyActiveBadge`, `updateProxyActiveBadge` 신규 함수
+  - polling에서 `updateProxyActiveBadge` 호출
+  - DOMContentLoaded, 탭 전환, 저장 버튼 후 `refreshProxyActiveBadge` 호출
+- `extension/popup.css`:
+  - `.proxy-active-badge` 스타일 추가
+- `extension/popup.js` renderResults:
+  - `item.discountedSalePrice` → `item.salesPrice`
+  - `item.salePrice` → `item.price`
+  - `item.name` → `item.productName`
+  - `item.productNo` → `item.productId`
+  - `item.storeName` → `item.mallName`
+
+### 미해결 문제
+- mallSeq가 실제 API 응답 최상위에 있는지, 또는 channel 객체에 있는지 실제 테스트로 확인 필요
+- `exportPrefix` input 이벤트로 타이핑 중 매번 storage 쓰기 발생 (성능 문제 없으나 debounce 개선 가능)
+
+### 다음 단계
+1. Chrome `chrome://extensions/` → NSP-Extractor **새로고침(↻)**
+2. 테스트: drtrue 상품으로 mallNo, channelId 값 확인
+3. 프록시 2개 이상 설정 후 반복교체주기 테스트
+
+---
+
+## 세션 15: 2026-03-05 - mallSeq 파싱 확정 + UI 개선 3종
+
+### 핵심 발견: PRELOADED_STATE 실제 구조 확정
+
+node.js로 product-brand.html / product-smartstore.html 직접 파싱하여 확인:
+- `state.channel.A` 는 **존재하지 않음** (undefined)
+- `state.smartStoreV2` 도 **존재하지 않음**
+- 브랜드스토어/스마트스토어 모두 `state.channel` = 직접 채널 객체
+- **`state.channel.mallSeq`** = 판매처순번 (brand: <MALL_SEQ_A>, smartstore: <MALL_SEQ_C>)
+- `state.channel.id` = 채널번호 (brand: <CHANNEL_ID_A>, smartstore: <CHANNEL_ID_C>)
+- `state.channel.channelNo` = undefined (이 키는 없음)
+
+### mallSeq 오진단 히스토리
+- 세션 13: `ch.channelNo` 추가 (API 응답의 channel 서브객체)
+- 세션 14: `state.channel.A.mallSeq` 경로 추가 (실제로 A는 없음)
+- **세션 15 최종 수정**: `channelObj = state.channel` (A 없이), `channelObj.mallSeq` = 정답
+
+### 수행한 작업
+
+#### 1. background.js - pickPreloadedInfo 완전 재작성
+- `channelObj = state?.channel?.A || state?.channel` → `channelObj = state?.channel`으로 단순화
+- channelId: `channelObj.id` 우선 (channelNo 키는 존재하지 않음)
+- mallNo: `channelObj.mallSeq || channelObj.brandMallSeq`로 단순화
+- `channelUid`: `channelObj.channelUid`로 단순화 (smartStoreV2 폴백 제거)
+- 디버그 로그 강화: `mallNo=`, `channelId=` 값 출력
+
+#### 2. popup.js - 진행도 포맷 tqdm 스타일
+- 기존: `12/50 | 경과 00:23 | 남은 00:51`
+- 변경: `24% 12/50 [00:23<00:51]` (tqdm의 `00:04<00:16` 형태)
+
+#### 3. popup.html - 설정 탭 섹션 순서 변경
+- 기존 순서: 프록시 → 기본URL파일 → 내보내기 → 저장된결과
+- 변경 순서: 기본URL파일 → 내보내기 → 프록시(+교체주기) → 저장된결과
+
+### 미해결 문제
+- mallSeq: PRELOADED_STATE 경로는 확정됐으나, API 응답 channel 서브객체에 mallSeq가 없는 경우
+  `buildProductResult`는 `data.mallNo → ch.mallSeq → ch.brandMallSeq` 순으로 폴백하는데
+  API 응답의 channel 서브객체가 compact(mallSeq 없음)인 경우 PRELOADED_STATE 보완에 의존함
+- fetchPreloadedInfo가 null 반환 시 mallNo는 빈값 → Service Worker 로그에서 `mallNo=` 확인 필요
+
+### 다음 단계
+1. Chrome `chrome://extensions/` → NSP-Extractor **새로고침(↻)**
+2. Service Worker 콘솔에서 `[BG] PRELOADED_STATE 사용: ... mallNo=<MALL_SEQ_B>` 확인
+3. 실제 수집 후 CSV에 판매처순번 컬럼 값 확인
+
+---
+
+## 세션 16: 2026-03-05 - UI 개선 3종 + mallSeq 폴백 강화
+
+### 작업 내용 요약
+
+#### 1. 진행상황 퍼센트 제거 (popup.js)
+- 기존: `24% 12/50 [00:23<00:51]`
+- 변경: `12/50 [00:23<00:51]` (개수 + 시간만 표시)
+- `updateProgress` 함수에서 `${pct}% ` 제거
+
+#### 2. JSON 키 순서 CSV_COLUMNS 순서로 고정 (background.js)
+- 문제: JSON.stringify 출력이 사전순으로 정렬되어 CSV 컬럼 순서와 불일치
+- 해결: `sortResultKeys(item)` 헬퍼 함수 신규 추가
+  - CSV_COLUMNS 배열 순서대로 키 재정렬
+  - CSV_COLUMNS에 없는 키는 뒤에 추가
+- 자동/수동 내보내기 JSON 모두 `finalResults.map(sortResultKeys)` 적용
+
+#### 3. mallSeq 폴백 강화 (background.js)
+- `extractMallSeqFromHtml(html)`: `/"mallSeq"\s*:\s*(\d+)/` 정규식으로 직접 추출
+- `fetchPreloadedInfo` 리팩터링:
+  - JSON.parse를 별도 try/catch로 격리
+  - JSON.parse 실패 시 정규식 폴백 자동 시도
+  - catch 로그에 URL 포함
+
+### 주요 발견 사항
+- getChannelUid API 응답에는 mallSeq 없음 (channelNo만 있음)
+- PRELOADED_STATE channel.mallSeq는 쿠키 무관하게 항상 존재
+- 실제 확장프로그램에서 fetchPreloadedInfo가 HTTP 429로 실패 → null 반환 → mallNo 공백
+
+### 미해결 문제
+- fetchProductHtml이 Service Worker에서 항상 HTTP 429를 받음
+- declarativeNetRequest 규칙이 상품 HTML 페이지 요청에는 미적용
+
+---
+
+## 세션 17: 2026-03-05 - mallSeq 근본 원인 확정 + channels.json 개선
+
+### 핵심 발견: fetchPreloadedInfo 전부 HTTP 429 실패
+
+수집 로그 분석: 10개 상품 전부 `fetchPreloadedInfo 실패: 상품 페이지 HTTP 429`
+- mallNo 공백 원인: PRELOADED_STATE에서만 추출 가능한데 429로 HTML 취득 불가
+- success가 아닌 상품(paused, soldout, deleted)의 채널ID 공백은 정상 동작 (오류 아님)
+
+### mallSeq 획득 경로 최종 정리
+
+| 경로 | mallSeq 있음? | 비고 |
+|------|------|------|
+| `/v1/channels?brandUrl=` API 응답 channel | **없음** | channelNo만 있음 |
+| `/v2/channels/.../products/...` API 응답 | 불명 | 다음 테스트로 확인 |
+| `PRELOADED_STATE.channel.mallSeq` | **있음** | HTTP 429로 취득 불가 |
+| `mall.tsv` (로컬 파일) | **있음** | 311개 판매처 등록됨 |
+
+### 해결: channels.json에 mallSeq 포함 + 캐시 폴백
+
+#### extension/channels.json 재생성
+- mall.tsv 컬럼: [0]판매처순번, [5]판매처ID(slug), [6]브랜드여부, [9]채널UID
+- mallSeq 필드 추가:
+  - <판매처B>: {channelUid: '<CHANNEL_UID_B>', isBrand: true, mallSeq: <MALL_SEQ_B>}
+  - <판매처A>: {channelUid: '<CHANNEL_UID_A>', isBrand: true, mallSeq: <MALL_SEQ_A>}
+  - <판매처F>: {mallSeq: <MALL_SEQ_F>}
+  - <판매처E>: {mallSeq: <MALL_SEQ_E>}
+  - <판매처G>: {mallSeq: <MALL_SEQ_G>}
+
+#### background.js 수정 (extractProduct)
+- channelUid 획득 전 getChannelCache()로 cacheMallSeq 미리 확보
+- PRELOADED_STATE 보완 블록 뒤 캐시 mallSeq 폴백 추가:
+  if (apiData.mallNo == null && cacheMallSeq != null) { apiData.mallNo = cacheMallSeq; }
+- 특수 상태(mergedData.mallNo)에도 cacheMallSeq 폴백 추가
+- buildProductResult에 임시 디버그 로그: channel 객체 키 출력 (API 응답 mallSeq 탐색용)
+
+### 커버 현황
+- 캐시 hit (mallSeq 있음): mall.tsv 등록 311개 판매처 (<판매처B>, <판매처A>, <판매처F> 등)
+- 캐시 miss (mallSeq 없음): <판매처H>, <판매처I>, <판매처J>, <판매처C>, <판매처D> 등 미등록
+
+### 미해결 문제
+- mall.tsv 미등록 판매처: mall.tsv에 추가하거나 fetchPreloadedInfo 429 해결 필요
+- fetchProductHtml 429 원인: 상품 페이지 HTML 요청에는 declarativeNetRequest 규칙 미적용
+- 상품 API 응답 channel 객체에 mallSeq가 있는지: [BG] channel keys: 로그로 확인 필요
+
+### 다음 단계
+1. Chrome 확장프로그램 새로고침(↻)
+2. Service Worker 콘솔 확인:
+  - [BG] 캐시 mallSeq 사용: <MALL_SEQ_B> (<판매처B>) → 캐시 폴백 성공
+  - [BG] channel mall관련키: → API 응답에 mallSeq 있으면 추가 경로 활용 가능
+3. mall.tsv에 <판매처H>, <판매처I> 등 미등록 판매처 추가 고려
+
+--- 
+
+---
+
+## 세션 18: 2026-03-05 - 로그 정리 + 랜덤 딜레이 범위 설정
+
+### 사용자 요청
+1. mallSeq 추가 시도 포기 선언
+2. 임시 파일 삭제 요청 (사용자가 직접 삭제)
+3. 콘솔 로그 정리 (channelUid 등 디버그 로그 제거, 시작/내보내기/실패만 유지)
+4. 랜덤 딜레이 범위 설정 (1.5초 고정 → n~m초 랜덤, 기본값 1.2~2.2초)
+
+### 핵심 발견: channel.accountNo = 채널ID (판매처순번이 아님)
+- 로그: {"accountNo":<CHANNEL_ID_X>,"channelNo":"<CHANNEL_ID_X>","naverPaySellerNo":"<CHANNEL_ID_X>"}
+- accountNo == channelNo → 동일값, 채널ID이지 판매처순번이 아님
+- 판매처순번(mallSeq)은 5~7자리, 채널ID는 9자리로 구별
+
+### 수행한 작업 (background.js)
+#### 로그 정리:
+- 제거: PRELOADED_STATE 사용, channelUid=, SmartStore→Brand 폴백, 모바일 API 실패
+- 제거: 캐시 mallSeq 사용, [BG] 파싱:, 특수 상태 감지, 쿠키 획득 개수
+- 유지: 수집 시작, 중단됨, [N/M] URL, 자동 내보내기, paused/deleted/soldout, 실패, 프록시/캡챠
+
+#### 딜레이 변수화:
+- DELAY_MIN/MAX 상수 → _delayMin/_delayMax 변수 (1200/2200)
+- loadDelayConfig() 추가, startCollection에서 호출
+- handleMessage에 saveDelay 케이스 추가
+
+### 수행한 작업 (popup.html/popup.js)
+- 설정 탭에 ⏱ 요청 딜레이 섹션 추가 (delayMin/delayMax 입력, 초 단위)
+- loadSettingsTab()에 저장값 로드, change 이벤트 → 자동 저장
+
+### 테스트 결과 (CSV 첨부)
+- <판매처A>(<MALL_SEQ_A>), <판매처B>(<MALL_SEQ_B>), <판매처F>(<MALL_SEQ_F>), <판매처G>(<MALL_SEQ_G>) → 캐시 hit ✅
+- <판매처H>, <판매처I>, <판매처J>, <판매처D> → mallNo 공란 (캐시 miss)
+- fetchPreloadedInfo 전부 429 → 다음 세션에서 제거 논의
+
+---
+
+## 세션 19: 2026-03-05 - fetchPreloadedInfo 제거 + API 전용 단순화
+
+### 사용자 요청
+1. 수집 탭 딜레이 선택박스 제거 (설정 탭과 중복)
+2. accountNo mallNo 폴백 제거 (accountNo = 채널ID, 판매처순번이 아님)
+3. fetchPreloadedInfo 제거 (전부 429 실패)
+4. 결과 테이블 상위 10개만 표시 (25000개 대비)
+
+### 수행한 작업 (background.js → v2.5)
+- fetchPreloadedInfo() 완전 제거
+- 관련 헬퍼 전체 제거: fetchProductHtml, extractPreloadedState, extractMallSeqFromHtml, pickPreloadedInfo, detectSpecialStatusFromHtml, detectSpecialStatus
+- detectSpecialStatusFromType() 유지 (API productStatusType 기반)
+- extractProduct() 단순화: preloadedInfo 전체 제거
+- startCollection: request.delay 제거, sleep(randomDelay())로 교체
+
+### 수행한 작업 (popup.html/popup.js)
+- 수집 탭 delaySelect 섹션 완전 제거
+- renderResults(): 상위 10개만 렌더링, 초과 시 "+ N개 더 있음 - CSV 저장" 안내 행
+
+### 변경 후 수집 흐름
+extractProduct:
+  1. getUAInfo() + getNaverCookieString()   (쿠키 유지)
+  2. channels.json → cacheMallSeq
+  3. getChannelUid()
+  4. fetchProductData() x 최대 4단계
+  5. cacheMallSeq 보완
+  6. productStatusType → 특수 상태 감지
+  7. buildProductResult()
+
+### 판매처순번 수집 현황 (최종)
+- channels.json 캐시 (311개): ✅
+- API channel.mallSeq/brandMallSeq: ✅ 있으면 자동 수집
+- fetchPreloadedInfo (PRELOADED_STATE): ❌ 전부 429 → 제거
+- channel.accountNo: ❌ 채널ID ≠ 판매처순번 → 제거
+
+### 미해결 문제
+- mall.tsv 미등록 판매처 mallSeq 수집 불가 (<판매처H> 등)
+
+---
+
+## 세션 19b: 2026-03-05 - 팝업 시간 표시 및 프록시 교체 카운트 수정
+
+### 변경 요약
+- 수집 완료/중단 시 `collectionStartTime` 초기화 제거 → 팝업을 닫았다 다시 열어도 시작 시간 유지
+- 팝업에서 경과 시간/남은 시간을 1초 단위로 지속 표시 (완료 상태에서도 경과 시간 확인)
+- 프록시 반복교체 카운트 로직을 “처리 완료된 항목” 기준으로 집계하도록 변경
+- 프록시 상태(요청/오류 카운트) 팝업 재오픈 후에도 3초마다 자동 갱신
+- 프록시 교체 시 `_proxyRequestCount`, `_proxyErrorCount`는 `switchToNextProxy()`에서 0으로 리셋됨 확인
+
+### 구현 파일
+- `extension/background.js`
+  - 수집 완료/중단 시 `collectionStartTime` null 초기화 제거
+  - 프록시 반복교체 카운트 집계 위치 정리 (완료된 항목만 카운트)
+
+- `extension/popup.js`
+  - 경과/남은시간 렌더링 및 1초 tick 타이머 추가
+  - storage의 `collectionStartTime`을 복구해 팝업 재열기 시 시간 유지
+  - 프록시 상태 3초 폴링 + 수집 탭 상태바 동기화
+
+### 확인한 동작
+- 팝업을 닫았다 열어도 진행 시간/남은 시간 표시 유지
+- 프록시 교체 시 오류 카운트가 다음 아이피로 넘어가지 않음
+
+---
+
+## 세션 20: 2026-03-05 - 진행시간 유지 + 프록시 카운트/상태 개선
+
+### 사용자 요청
+1. 수집 완료 후에도 진행시간 유지 (팝업 다시 열어도 확인)
+2. 팝업에서 경과시간/남은시간 표시
+3. 반복교체 카운트(rotateInterval) 오프바이원/표시 이상 수정
+4. 프록시 상태가 팝업 재오픈 시 자동 갱신되지 않음 → 개선
+5. 프록시 교체 시 오류 카운트 초기화 확인
+
+### 확인 결과
+- `switchToNextProxy()`에서 `_proxyRequestCount = 0`, `_proxyErrorCount = 0`으로 초기화됨 → 오류 카운트는 다음 IP로 넘어가지 않음
+
+### 수행한 작업 (background.js)
+- 수집 완료/중단 시 `collectionStartTime`을 null로 초기화하지 않도록 제거
+- 반복교체 카운트 계산 로직 리팩터링:
+  - 성공/특수상태/최종에러 등 **결과가 확정된 항목만** 카운트
+  - 재시도 예약된 항목은 카운트에서 제외
+  - `_proxyRequestCount` 기반 교체가 정확히 N건 처리마다 동작하도록 정리
+
+### 수행한 작업 (popup.js)
+- 수집 완료 후에도 `collectionStartTime` 유지 → 팝업 재오픈 시 경과시간 표시
+- 경과/남은시간 갱신을 1초 타이머로 분리 (`startTimerTick`)
+- 프록시 상태는 3초 주기로 자동 갱신 (`proxyPollTimer`)
+- 수집 탭의 프록시 상태 바도 `refreshProxyActiveBadge()`에서 동기화
+
+### 결과
+- 팝업을 닫았다 열어도 경과시간 표시
+- 프록시 반복교체 카운트가 정확히 처리 완료 건수 기준으로 증가
+- 프록시 교체 시 오류 카운트는 항상 0으로 리셋됨
+
+---
+
+## 세션 12: 2026-03-06 - 스케줄 자동 수집 + Slack 알림 + 모든 설정 즉시 저장 (v3.1)
+
+### 작업 내용 요약
+- 스케줄 자동 수집 기능 구현 (`chrome.alarms` API 사용)
+- Slack 봇 알림 기능 구현 (수집 완료 시 요약 메시지 + 선택적 CSV 첨부)
+- 모든 설정 변경 즉시 저장으로 통일 (기존 프록시/내보내기의 저장 버튼 제거)
+- 버전: v3.0 → v3.1.0
+
+### 변경 파일 요약
+
+#### extension/manifest.json (v3.0.0 → v3.1.0)
+- `"alarms"` 권한 추가 (chrome.alarms API 사용)
+- `host_permissions`에 `"https://slack.com/*"` 추가 (Service Worker → Slack API fetch)
+
+#### extension/background.js
+- 상단 주석에 v3.1 변경 내용 기록
+- `chrome.alarms.onAlarm` 리스너 추가:
+  - alarm name: `nsp-schedule`
+  - 발화 시 `scheduleConfig` 로드 → `defaultFileContent`에서 URL 파싱 → `startCollection` 액션 실행
+  - 이미 수집 중이면 건너뜀
+- `applyScheduleAlarm(cfg)` 함수 추가:
+  - 기존 alarm 제거 후 새 alarm 등록
+  - `chrome.alarms.create('nsp-schedule', { when: 다음발화시각, periodInMinutes: 1440 })`
+  - 오늘 HH:MM이 이미 지났으면 내일로 설정
+- `sendSlackNotification(results)` 함수 추가:
+  - `slackConfig` 로드 → enabled/token/channel 검증
+  - `chat.postMessage` API로 요약 메시지 전송
+  - `attachFile: true`인 경우 `files.getUploadURLExternal` → 업로드 → `files.completeUploadExternal` 3단계로 CSV 파일 첨부 (Slack 신규 API 사용, deprecated `files.upload` 미사용)
+- `handleMessage`에 새 케이스 4개 추가:
+  - `saveScheduleConfig`: 저장 + `applyScheduleAlarm` 호출
+  - `getScheduleConfig`: 조회
+  - `saveSlackConfig`: 저장
+  - `getSlackConfig`: 조회
+- `startCollection` 완료 후 `sendSlackNotification(finalResults)` 호출 추가
+- `onInstalled` 리스너: v3.1 로그, 설치 시 `scheduleConfig` 로드하여 alarm 복원
+
+#### extension/popup.html
+- 설정 탭 "요청 딜레이"와 "프록시 설정" 사이에 2개 섹션 추가:
+  - **⏰ 스케줄 수집**: 활성화 토글, 실행 시각(time input), 다음 실행 예정 표시
+  - **💬 Slack 알림**: 활성화 토글, Bot Token(password input), 채널 ID, CSV 파일 첨부 토글
+- 내보내기 설정의 "💾 저장" 버튼 제거
+- 프록시 설정의 "💾 저장" 버튼 제거
+
+#### extension/popup.js
+- `saveProxyBtn`, `saveExportBtn` DOM 참조 제거
+- 스케줄/Slack 관련 DOM 참조 추가: `scheduleEnabled`, `scheduleEnabledLabel`, `scheduleTime`, `scheduleNextInfo`, `slackEnabled`, `slackEnabledLabel`, `slackToken`, `slackChannel`, `slackAttachFile`
+- `loadSettingsTab()` 함수 확장:
+  - 스케줄 설정 로드 (`getScheduleConfig`)
+  - Slack 설정 로드 (`getSlackConfig`)
+- 프록시 설정 즉시 저장으로 변경:
+  - `proxyEnabled.change` → `saveProxySettings()` 호출
+  - `proxyInput.input` → 디바운스 500ms 후 `saveProxySettings()`
+  - `proxyRotateInterval.change`, `proxyErrorThreshold.change` → `saveProxySettings()`
+  - `saveProxyBtn` click 리스너 제거
+- `saveExportBtn` click 리스너 제거 (이미 change 이벤트로 자동저장 중)
+- 스케줄 이벤트 리스너:
+  - `scheduleEnabled.change` → `saveScheduleSettings()`
+  - `scheduleTime.change` → `saveScheduleSettings()`
+  - `updateScheduleNextInfo(cfg)`: 다음 발화 날짜/시각 계산 후 `scheduleNextInfo` 표시
+- Slack 이벤트 리스너:
+  - `slackEnabled.change` → `saveSlackSettings()`
+  - `slackToken.input`, `slackChannel.input` → 디바운스 700ms 후 `saveSlackSettings()`
+  - `slackAttachFile.change` → `saveSlackSettings()`
+
+#### extension/popup.css
+- `.toggle-label` 클래스 추가 (활성/비활성 텍스트 스타일)
+- `#scheduleNextInfo` 스타일 추가 (초록색 텍스트)
+- `input[type="time"].input-text` 스타일 추가
+
+### 핵심 설계 결정 사항
+
+#### 스케줄 수집
+- `chrome.alarms`는 MV3 Service Worker가 꺼진 상태에서도 alarm 등록이 유지되며, 발화 시 SW를 자동으로 깨움
+- alarm `periodInMinutes: 1440` (24시간)으로 매일 반복
+- URL 소스: `chrome.storage.local`에 저장된 `defaultFileContent` (설정 탭의 "기본 URL 파일" 내용)
+- 한계: 브라우저(Chrome) 자체가 완전히 꺼진 경우 alarm 발화 불가 (Chrome 정책 제약)
+
+#### Slack 파일 첨부
+- `files.upload` API는 deprecated → `files.getUploadURLExternal` + `files.completeUploadExternal` 2단계 사용
+- BOM(`\uFEFF`) 포함 CSV 업로드로 한글 깨짐 방지
+- 파일 첨부 실패 시 메시지 전송은 유지 (try/catch로 분리)
+
+#### 설정 즉시 저장
+- 프록시 텍스트 입력은 타이핑 중 불필요한 저장 방지를 위해 500ms 디바운스 적용
+- Slack Token/Channel 입력은 700ms 디바운스 (더 긴 문자열 입력 고려)
+- 토글, 라디오, 숫자 입력 등 단발성 이벤트는 즉시 저장
+
+### 미해결 문제
+- 스케줄 수집 실제 동작 테스트 미실시 (alarm 발화 후 startCollection 흐름 검증 필요)
+- Slack API 테스트 미실시 (token/channel 유효성 검증 로직 없음)
+- Slack Bot Token이 `chrome.storage.local`에 평문 저장됨 (로컬 전용이므로 외부 유출 위험 낮음)
+
+### 다음 단계
+1. Chrome `chrome://extensions/` → NSP-Extractor **새로고침(↻)**
+   - `alarms` 권한 추가로 재승인 필요할 수 있음
+2. 설정 탭에서 스케줄/Slack 설정 섹션 UI 확인
+3. 스케줄 테스트: 현재 시각 + 2분 후로 설정 → 자동 수집 발화 확인
+   - Service Worker 콘솔에서 `[BG] 스케줄 alarm 발화:` 로그 확인
+4. Slack 테스트: Bot Token + Channel ID 입력 → 수동 수집 완료 후 메시지 수신 확인
+
+---
+
+## 세션 13: 2026-03-06 - 로그 정리 + 딜레이 UI + Slack 파일 전송 수정 (v3.2)
+
+### 테스트 결과 (v3.1)
+- 스케줄 수집: ✅ 정상 동작 확인 (console.log에서 전체 수집 흐름 확인됨)
+- Slack 메시지: ✅ 전송 성공
+- Slack 파일 첨부: ❌ `getUploadURLExternal 실패: invalid_arguments`
+
+### 수행한 작업
+
+#### 1. background.js 로그 정리
+- `loadProxyConfig()` 완료 로그 제거 (수집 시작 요약에 통합)
+- `applyCurrentProxy()` 로그 제거 ("프록시 비활성화", "프록시 적용" 메시지 모두 제거)
+- `applyScheduleAlarm()` 등록/해제 로그 제거
+- 알람 핸들러 내 "스케줄 alarm 발화", "스케줄 수집 시작" 로그 제거
+- 설치 로그: `v3.2 설치됨`으로 간소화
+- **수집 시작 시 설정 상태 요약**: `console.log('[BG] 수집 시작', { urls, delay, proxy, autoExport, schedule, slack })` - Object 형태로 한 번에 출력
+
+#### 2. 딜레이 UI 레이아웃 수정
+- 기존: 최소/최대가 `flex-wrap`으로 좌측 정렬되어 왼쪽에 쏠림
+- 변경: `delay-inline-row`를 `justify-content: space-between`으로, 각 항목을 `delay-inline-item`으로 묶어 라벨+입력상자가 각각 좌측/우측에 위치
+
+#### 3. Slack 파일 전송 완전 재작성
+**원인 분석:**
+- `getUploadURLExternal`의 `invalid_arguments` 오류: 필수 파라미터는 `filename`과 `length`뿐. `content_type`은 **공식 문서에 없는 파라미터**로 오히려 오류를 유발했음
+- Step 2 업로드: raw `ArrayBuffer` body로 전송하면 Slack이 파일을 제대로 처리 못함 → `FormData` (`multipart/form-data`) 방식으로 변경 필요
+
+**변경 내용:**
+- `chat.postMessage` API 완전 제거 (별도 메시지 전송 없음)
+- Step 1 `getUploadURLExternal`: `content_type` 제거, `filename` + `length`만 전송
+- Step 2 업로드: `new FormData()` + `formData.append('file', new Blob([fileBytes]), fname)` 방식으로 변경
+- Step 3 `completeUploadExternal`: `initial_comment`에 수집 요약 메시지 포함 → 파일+메시지 한 번에 전송
+- `files.slack.com` 도메인을 `manifest.json` `host_permissions`에 추가 (파일 업로드 URL이 이 도메인으로 리다이렉트됨)
+
+### 핵심 설계 결정 사항
+
+#### Slack 파일 업로드 3단계 플로우 (확정)
+```
+1. POST files.getUploadURLExternal  { filename, length }
+  → { upload_url, file_id }
+
+2. POST {upload_url}  FormData { filename, file: Blob }
+  → HTTP 200 (성공)
+
+3. POST files.completeUploadExternal  { files:[{id, title}], channel_id, initial_comment: "요약메시지" }
+  → 채널에 파일+메시지 동시 게시
+```
+
+#### 필요한 Slack Bot 권한
+- `files:write` - 파일 업로드 (getUploadURLExternal, completeUploadExternal)
+- `chat:write` - 선택사항 (completeUploadExternal의 initial_comment가 이 권한 필요)
+- `channels:read`, `groups:read` - 채널 접근 (채널 멤버십 확인용)
+
+### 수정된 파일
+- `extension/background.js` (v3.2) ✅
+- `extension/manifest.json` (v3.2.0) ✅ - `files.slack.com` 호스트 권한 추가
+- `extension/popup.html` ✅
+- `extension/popup.css` ✅
+
+### 다음 단계
+1. Chrome 확장 프로그램 재로드 (manifest 변경으로 권한 재승인 필요할 수 있음)
+2. Slack 테스트: 수동 수집 완료 후 채널에 파일+메시지 동시 전송 확인
+3. 수집 시작 시 콘솔에 설정 상태 Object 출력 확인
+
+---
+
+## 세션 14: 2026-03-06 - Slack 파일 전송 근본 원인 규명 및 수정 (v3.2.1)
+
+### 문제 상황
+- `getUploadURLExternal 실패: invalid_arguments` 여전히 발생
+- Python으로 직접 API 호출 테스트하여 정확한 원인 규명
+
+### 근본 원인 발견 (Python 직접 테스트)
+```python
+# 실패 케이스 - Content-Type: application/json
+requests.post('.../files.getUploadURLExternal',
+    headers={'Content-Type': 'application/json', ...},
+    json={'filename': fname, 'length': len(content)}
+)
+# → {"ok": false, "error": "invalid_arguments",
+#    "messages": ["missing required field: length", "missing required field: filename"]}
+```
+- `application/json`으로 보내면 Slack이 `filename`/`length` 파라미터를 **아예 인식하지 못함**
+- **반드시 `application/x-www-form-urlencoded`** 형식으로 전송해야 함
+
+```python
+# 성공 케이스 - form-urlencoded
+requests.post('.../files.getUploadURLExternal',
+    headers={'Authorization': 'Bearer ' + token},
+    data={'filename': fname, 'length': len(content)}  # requests가 자동으로 form-urlencoded 처리
+)
+# → {"ok": true, "upload_url": "...", "file_id": "F0AJR0C46EP"}
+```
+
+### 전체 플로우 테스트 결과 (공개 채널, 실제 JSON 파일)
+```
+Step1 ok: True | file_id: <SLACK_FILE_ID>
+Step2: 200 OK
+Step3 ok: True
+channels: ['<SLACK_CHANNEL_ID>']   ← 채널 공유 성공
+shares keys: ['public']
+```
+
+### 수정 내용 (background.js)
+
+#### Step 1 수정
+```javascript
+// 변경 전 (실패)
+fetch(url, {
+  headers: { 'Content-Type': 'application/json; charset=utf-8', ... },
+  body: JSON.stringify({ filename, length })
+})
+
+// 변경 후 (성공)
+fetch(url, {
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded', ... },
+  body: 'filename=' + encodeURIComponent(fname) + '&length=' + fileBytes.byteLength
+})
+```
+
+#### Step 2 수정
+- `formData.append('filename', ...)` 제거 (불필요)
+- `new Blob([fileBytes], { type: 'application/json' | 'text/csv' })` MIME 타입 명시
+
+#### 수집 시작 로그 개선
+- 이모티콘 제거
+- 비활성화된 항목은 로그에서 생략 (proxy, autoExport, schedule, slack이 비활성이면 출력 안 함)
+- `urls: "10개"` → `urls: 10` (정수)
+
+### 수정된 파일
+- `extension/background.js` ✅
+
+---
+
+## 세션 15: 2026-03-06 - channelUid 획득 버그 수정 및 채널 정보 획득 개선 (v3.2.1)
+
+### 문제 상황
+- `channels.json`을 빈 딕셔너리로 변경 후 BrandStore 상품들 전부 `channelUid 획득 실패`
+- **버그 원인**: BrandStore 채널 API 응답은 최상위에 직접 `channelUid`가 있는데, 기존 코드는 `json.channel.channelUid`를 읽으려 해 null 반환
+
+### API 응답 구조 (Python 검증)
+- SmartStore 데스크탑/모바일: 429 (쿠키 없는 raw 요청 차단) → 확장 프로그램에서 쿠키 주입 시 정상
+- BrandStore 데스크탑/모바일: 200 성공
+- SmartStore: `{ channel: { channelUid, id, mallSeq, channelName } }` (래퍼 있음)
+- BrandStore: `{ channelUid, id, mallSeq, channelName }` (최상위에 직접, 래퍼 없음)
+
+### 핵심 변경사항
+
+#### getChannelInfo() - 5단계 폴백 (getChannelUid 대체)
+1. 런타임 인메모리 캐시 `_channelInfoCache` (수집 세션 내 재사용)
+2. `channels.json` 로컬 파일
+3. `chrome.storage.local.channelPersist` 영구 캐시 (자동 학습)
+4. 데스크탑 API
+5. 모바일 API 폴백
+
+#### fetchChannelInfo() BrandStore 파싱 수정
+```javascript
+if (storeType === 'smartstore') {
+  ch = json.channel;                                     // SmartStore: 래퍼 있음
+} else {
+  ch = json.channelUid ? json : (json.channel || null);  // BrandStore: 최상위 직접
+}
+```
+
+#### 반환값 확장: channelUid만이 아닌 { channelUid, channelId, mallSeq, channelName } 반환
+- `extractProduct()` 에서 `mallSeq`, `channelId`를 API 응답 보완에 활용
+- `persistChannelInfo()` 로 신규 획득 정보 자동 저장
+
+### 수정 파일
+- `extension/background.js` ✅ v3.2.1
+- `extension/channels.json` ✅ → `{}` 초기화
+
+---
+
+## 세션 15 (계속): 2026-03-06 - 3가지 Q&A 검증 정리
+
+### Q1. 캐시 로직 검증 - 같은 storeSlug는 API를 건너뛰나?
+
+**결론: ✅ 맞음**
+
+`getChannelInfo()` 5단계 폴백:
+1. `_channelInfoCache[storeSlug]` → 있으면 즉시 반환 (API 호출 없음)
+2. `channels.json` → 있으면 채움 + 런타임 캐시에도 저장
+3. `chrome.storage.local.channelPersist` → 이전 수집에서 학습된 값
+4. 데스크탑 API 호출 → 성공 시 1+3에 저장
+5. 모바일 API 호출 → 성공 시 1+3에 저장
+
+같은 storeSlug의 여러 상품을 한 번에 수집할 때:
+- 첫 번째 상품: 1→2→3→4 순서로 진행, API 호출 1회
+- 두 번째 이후 상품: 1순위 (`_channelInfoCache`) 즉시 히트 → **API 호출 0회**
+- channels.json에 해당 storeSlug가 있으면 처음부터 2순위 히트 → API 호출 0회
+
+### Q2. channels.json vs chrome.storage.local 생존 범위
+
+**결론: channels.json은 개발자 캐시 (파일에 값 유지), chrome.storage는 자동학습 영구 저장**
+
+| 저장소 | 내용 | 연장 업데이트(↻) | 완전 삭제 후 재설치 |
+|--------|------|-----------------|-------------------|
+| `channels.json` | 개발자가 직접 관리하는 사전 빌드 캐시 | ✅ 유지 | ✅ 유지 (파일이므로) |
+| `chrome.storage.local.channelPersist` | 런타임 자동 학습 | ✅ 유지 | ❌ 초기화 |
+| `_channelInfoCache` | 인메모리 (SW 수명) | ❌ 초기화 | ❌ 초기화 |
+
+`channels.json`은 git 관리 대상 파일 → 내용이 있으면 항상 우선 사용됨.
+빈 `{}`으로 두면 `chrome.storage.local`이 자동 학습 역할을 대신함.
+
+### Q3. 프록시 IP 누출 검증 (Python test_proxy_leak.py)
+
+**결론: ✅ 완전히 안전 - 실제 IP 완전 은닉**
+
+테스트 환경:
+- 실제 IP: `<실제 IP>`
+- 프록시: `<프록시 IP>:<포트>`
+
+테스트 결과 (5가지):
+1. 직접 요청 IP: `<실제 IP>` → 실제 IP 확인 ✅
+2. 프록시 경유 IP: `<프록시 IP>` → 프록시 IP로 정상 교체 ✅
+3. httpbin 헤더 검사: origin=`<프록시 IP>`, X-Amzn-Trace-Id만 존재, X-Forwarded-For 없음 ✅
+4. 네이버 API 요청: HTTP 200, 응답 바디/헤더 모두 실제 IP 없음 ✅
+5. TCP 소켓 연결: 프록시 서버 직접 연결 성공 ✅
+
+프록시 특성: 비투명(non-transparent), X-Forwarded-For/Via/X-Real-IP 헤더 미추가
+
+---
+
+## 세션 16: 2026-03-06 - 삭제 상품 캐시 (v3.2.2)
+
+### 기능 요청
+- 수집 중 `deleted` 판정된 상품코드를 기억해두었다가 다음 수집 시 HTTP 요청 없이 즉시 deleted 처리
+- 단, URL 파일이 바뀌거나 수동 입력 시에는 캐시 초기화 (다른 파일 = 다른 상품 세트)
+
+### 성능 검토 결론: 문제 없음
+- 상품코드는 숫자 문자열 10자리 내외, `Set` 자료구조 → O(1) 조회
+- 수만 개 저장해도 메모리 수 MB 수준 (SW 수명 동안만 유지)
+- `chrome.storage` 저장 없이 인메모리만 사용 → storage 접근 오버헤드 0
+- deleted 캐시 히트 시 sleep(50ms)만 → 기존 2초+ 딜레이 완전 생략
+
+### 구현 내용
+
+#### background.js (v3.2.2)
+새 변수 추가:
+```javascript
+let _deletedProductIds = new Set();  // 삭제 확정 상품코드 집합
+let _lastUrlSource     = null;       // 직전 수집 URL 소스
+```
+
+`runCollection(urls, urlSource)` - urlSource 파라미터 추가:
+```javascript
+const src = urlSource || 'manual';
+if (src !== _lastUrlSource) {
+  _deletedProductIds = new Set();   // 소스 변경 시 초기화
+  _lastUrlSource     = src;
+  console.log('[BG] 삭제 캐시 초기화 (소스 변경: ' + src + ')');
+}
+```
+
+수집 루프 내 삭제 캐시 조기 확인 (isValidNaverUrl 체크 직후):
+```javascript
+const cachedProductId = extractProductNoFromUrl(url);
+if (cachedProductId && _deletedProductIds.has(cachedProductId)) {
+  console.log('[BG] 삭제 캐시 히트 → 즉시 deleted: ' + url);
+  results[task.index] = {
+    productId: cachedProductId, productUrl: url,
+    status: 'deleted', timestamp: new Date().toISOString()
+  };
+  completed++;
+  await sleep(50);  // HTTP 요청 없으므로 최소 대기
+  continue;
+}
+```
+
+`SpecialStatusError('deleted')` 처리 시 캐시 저장:
+```javascript
+if (err.specialStatus === 'deleted' && pid) {
+  _deletedProductIds.add(pid);
+}
+```
+
+스케줄 자동 수집: `runCollection(urls, defaultFileName || 'schedule')`
+- defaultFileName으로 urlSource 식별 → 같은 파일이면 캐시 유지
+
+#### popup.js
+새 변수: `let _currentUrlSource = 'manual';`
+
+소스 업데이트 시점:
+- 파일 로드 (`fileInput.change`, `tryLoadDefaultFile`) → `showFileInfo(name)` 안에서 `_currentUrlSource = name`
+- 파일 지우기 (`clearFileBtn`, `clearInputBtn`) → `_currentUrlSource = 'manual'`
+- startCollection 메시지: `{ action: 'startCollection', urls, urlSource: _currentUrlSource }`
+
+### urlSource 로직 요약
+| 시나리오 | urlSource 값 | 캐시 동작 |
+|---------|-------------|----------|
+| 같은 파일로 재수집 | `'urls.txt'` (동일) | 유지 - deleted 상품 즉시 처리 |
+| 다른 파일로 교체 | `'urls-new.txt'` (다름) | 초기화 - 전체 재조회 |
+| 수동 입력/붙여넣기 | `'manual'` | 항상 초기화 |
+| 스케줄 자동 수집 | `defaultFileName` | 같은 파일이면 유지 |
+
+### 수정 파일
+- `extension/background.js` ✅ v3.2.2
+- `extension/popup.js` ✅ urlSource 전달 추가
+
+---
+
+## 세션 17: 즉시 중단 시 미처리 행 제거 + 난독화 빌드 파이프라인
+
+### 파트 1: 즉시 중단 시 미처리 행 제거 (v3.2.2 -> v3.2.3)
+
+#### 문제
+수집 중 즉시 중단 시 처리 못 한 나머지 URL들이 모두 미처리 오류 행으로 CSV에 출력되는 현상.
+사용자 요구: 수집한 데까지만 내보내기
+
+#### 원인 및 수정 (extension/background.js)
+
+1. runCollection 종료:
+   Before: results.map(r => r || makeError(\'\', \'미처리\')).filter(Boolean)
+   After:  results.filter(Boolean)   // null 슬롯(미수집) 제거
+
+2. fatalErr 블록 내 null 슬롯 루프 제거
+
+3. stopCollection 핸들러:
+   Before: return { success: true, stopped: true, data: partialResults }
+   After:  return { success: true, stopped: true, data: partialResults.filter(Boolean) }
+
+#### 버전 업데이트
+- 헤더 주석: v3.2.2 -> v3.2.3
+- console.log: NSP-Extractor v3.2.2 설치됨 -> v3.2.3 설치됨
+- 변경 내역 블록 추가 (v3.2.2 -> v3.2.3)
+
+---
+
+### 파트 2: 난독화 빌드 파이프라인
+
+#### 목적
+외부 공유 시 소스 코드 노출 방지. extension/ 원본 유지, extension-min/ 난독화 버전 별도 생성.
+
+#### 도구 설치
+  npm install -g javascript-obfuscator html-minifier-terser clean-css-cli
+  npm install javascript-obfuscator html-minifier-terser clean-css
+Node.js v24.11.0, npm 11.6.1
+
+#### 빌드 스크립트: build_min.js
+위치: `<프로젝트 루트 경로>/build_min.js`
+실행: node build_min.js (프로젝트 루트에서)
+
+주요 난독화 옵션:
+  compact: true
+  controlFlowFlattening: true (threshold 0.5)
+  deadCodeInjection: true (threshold 0.2)
+  identifierNamesGenerator: hexadecimal  (_0x1ef9c5 형태)
+  renameGlobals: false  (chrome API 깨짐 방지)
+  selfDefending: true
+  stringArray: true, stringArrayEncoding: [base64]
+  splitStrings: true, splitStringsChunkLength: 8
+  transformObjectKeys: true
+  disableConsoleOutput: false  ([BG] 로그 유지)
+  target: browser
+
+파일별 처리:
+  .js   -> javascript-obfuscator
+  .html -> html-minifier-terser (collapseWhitespace, removeComments, minifyCSS, minifyJS)
+  .css  -> CleanCSS level 2
+  .json -> JSON.stringify(JSON.parse(src))
+  기타  -> fs.copyFileSync
+
+#### 빌드 결과
+
+파일              원본      난독화 후
+background.js     63.5 KB   278.9 KB
+content_script.js  1.1 KB    15.3 KB
+popup.js          32.2 KB   163.1 KB
+popup.css         13.9 KB     7.5 KB
+popup.html        13.2 KB     9.2 KB
+channels.json     34.6 KB    25.5 KB
+manifest.json      1.3 KB     1.0 KB
+합계             161.0 KB   501.5 KB (+212%)
+
+JS 난독화 특성상 크기 증가 (dead code injection, string array, control flow 추가)
+
+#### 난독화 확인 (peek_min.py 실행 결과)
+background.js    -> (function(_0x1ef9c5,_0x525844){const _0x3a94ac={...
+popup.js         -> (function(_0x189de7,_0x3fd3bf){const _0x4653e0={...
+content_script.js-> function _0x4a01bd(_0xfdab35,_0x159e15,...
+원본 식별자/문자열 완전 숨김 확인
+
+#### 배포 방법 (CRX 미사용)
+크롬 웹 스토어 미등록 CRX는 보안 정책상 설치 불가. 현실적 배포:
+1. extension-min/ 폴더를 zip으로 압축 -> 수신자에게 전달
+2. 수신자: chrome://extensions/ -> 개발자 모드 ON
+        -> 압축 해제된 확장 프로그램 로드 -> 폴더 선택
+재빌드: 소스 변경 후 node build_min.js 재실행
+
+### 생성/수정 파일
+- extension/background.js v3.2.3 (버전 주석 + 설치 로그)
+- build_min.js (신규, 난독화 빌드 스크립트)
+- extension-min/ (신규 폴더, 난독화 출력물)
+- peek_min.py (신규, 난독화 결과 미리보기)
+
+---
+
+## 세션 18: 2026-03-09 - 옵션/추가상품 단위 재고 수집 (v3.2.3 → v3.3.0)
+
+### 요청 사항
+- 옵션/추가상품별 재고수량을 개별 행(row)으로 수집
+- CSV 컬럼 확장: productNo, optionId, optionGroup1~3, optionName1~3, optionPrice, registerDate
+- productId(URL 끝 숫자 = data.id)와 productNo(내부 상품번호 = data.productNo) 분리
+
+### 핵심 설계 결정
+
+#### buildProductResult 반환 구조 변경
+- 기존: 상품 1건 = 객체 1개 반환
+- 변경: 상품 1건 = 배열 반환 (옵션/추가상품별 행)
+- optionCombinations(조합형 옵션): opt.id → optionId, opt.optionName1~3, opt.price, opt.stockQuantity, opt.registerDate
+- options(단독형 옵션): opt.id → optionId, opt.groupName → optionGroup1, opt.name → optionName1
+- supplementProducts(추가상품): sup.id → optionId, sup.groupName → optionGroup1, sup.name → optionName1
+- 옵션도 추가상품도 없는 단품: optionId = productId, 1건짜리 배열
+
+#### productId vs productNo 분리
+- productId = String(data.id) = URL 끝 숫자 (외부 식별자)
+- productNo = String(data.productNo) = 내부 상품번호
+- 두 값이 다를 수 있음 (BrandStore 주로)
+
+#### optionGroup 이름 추출
+- data.options 배열(옵션 그룹 정의)의 groupName 순서대로 optionGroup1~3 설정
+- optionCombinations 각 행에는 groupName이 없으므로 options 배열에서 보완
+
+#### registerDate 파싱
+- opt.registerDate: "2025-08-22T02:34:47.015+00:00" 형식
+- normalizeDate(): new Date(dateStr).toISOString() → "+00:00" → "Z" 변환
+
+### 구현 내용 (파일별)
+
+#### extension/background.js (v3.3.0)
+- buildProductResult: 배열 반환으로 전면 재작성
+  - 반환: rows[] (각 행 = base 공통 필드 + 옵션별 override)
+  - base 공통 필드: productId, productNo, mallNo, mallName, channelId, channelName, brandId, brandName, categoryId, categoryName, productName, price, salesPrice, reviewCount, reviewScore, soldout, status, deliveryType, wholeCategoryId, wholeCategoryName, productUrl, channelUid, timestamp
+  - 옵션 행 추가 필드: optionId, optionGroup1~3, optionName1~3, optionPrice, stockQuantity, registerDate
+- CSV_COLUMNS 확장 (34개 컬럼):
+  상품코드(productId), 상품번호(productNo), 옵션코드(optionId), 판매처순번(mallNo), 판매처명(mallName), 채널ID(channelId), 채널명(channelName), 브랜드ID(brandId), 브랜드명(brandName), 카테고리ID(categoryId), 카테고리(categoryName), 상품명(productName), 옵션그룹1~3, 옵션명1~3, 판매가(price), 할인가(salesPrice), 옵션가(optionPrice), 재고수량(stockQuantity), 리뷰수(reviewCount), 평점(reviewScore), 품절여부(soldout), 상태(status), 배송속성(deliveryType), 전체카테고리ID, 전체카테고리, 상품주소(productUrl), 채널UID(channelUid), 옵션등록일(registerDate), 오류메시지(errorMessage), 수집시간(timestamp)
+- runCollection results 구조 변경:
+  - results[i] = 배열 (buildProductResult 반환값)
+  - 중간 저장: results.filter(Boolean).flat()
+  - 최종: results.filter(Boolean).flat() → finalResults
+- makeError(), SpecialStatusError 처리, 삭제캐시 히트: 모두 [{...}] 배열로 래핑
+- normalizeDate() 함수 신규 추가
+
+#### extension/popup.js (v3.3.0)
+- renderResults: 새 통계 포맷
+  - uniqueProducts = new Set(validData.map(r => r.productId)).size
+  - "총 188행 (3상품) · 성공 188개" 형식
+  - 옵션명이 있으면 상품명 뒤에 [옵션명1/옵션명2] 형태로 표시
+
+#### extension/manifest.json
+- version: 3.3.0
+
+### 테스트 결과
+- 사용자 테스트 성공: 3개 URL → 188행 CSV 정상 출력
+- 옵션별 stockQuantity, optionGroup, optionName, optionPrice, registerDate 모두 정상
+- 스크린샷에서 "총 188행 (3상품) · 성공 188개" 확인됨
+
+### 빌드 결과 (v3.3.0)
+- node build_min.js 실행 완료
+- background.js: 63.5KB → 278.9KB (난독화)
+- 합계: 원본 161KB → 난독화 후 501KB
+
+---
+
+## 세션 19: 2026-03-09 - 데이터 구조 분리 + 3파일 내보내기 (v3.3.0 → v3.4.0)
+
+### 요청 사항
+1. optionSeq 필드 추가 (옵션: regOrder, 추가상품: 배열 인덱스 1부터), 위치는 optionId 다음
+2. 데이터 구조를 {products:[], options:[], supplements:[]} 3종으로 분리
+3. CSV 내보내기 시 3개 파일로 분리, 파일 접두어도 3개로 확장 (기본값: 네이버상품/네이버옵션/네이버추가상품)
+4. JSON 내보내기 시 단일 파일, 2~3번째 접두어 입력칸 비활성화
+5. 미리보기: 상품 단위로 표시 (재고수량 옵션 합산)
+6. chat.log 작성 (무한로딩 없이 에디터 도구 사용)
+7. 버전 3.4.0
+
+### 핵심 설계 결정
+
+#### 데이터 구조 분리 원칙
+- products[]: 상품 1건 1행, 옵션 관련 컬럼 없음, stockQuantity = 옵션+추가상품 합산
+- options[]: FK productId + 옵션 상세 (optionSeq, optionGroup1~3, optionName1~3, optionPrice, stockQuantity, registerDate)
+- supplements[]: FK productId + 추가상품 상세 (optionSeq = idx+1, optionGroup1, optionName1, optionPrice, stockQuantity)
+- 에러/특수상태 상품은 products[]에만 들어가고 options/supplements는 빈 배열
+
+#### optionSeq
+- optionCombinations, options(단독형): opt.regOrder 사용 (없으면 빈 문자열)
+- supplementProducts: 배열 인덱스 + 1 (1부터 시작)
+
+#### 상품 stockQuantity 합산 로직
+- allOptionStocks = optionRows + supplementRows의 stockQuantity 중 0 이상인 값
+- 합산값이 있으면 stockQuantity = sum, 없으면(단품) = data.stockQuantity
+
+#### collectionResults storage 구조 변경
+- v3.3.0: collectionResults = [...] (flat 배열)
+- v3.4.0: collectionResults = { products: [...], options: [...], supplements: [...] }
+- flattenResults() 헬퍼: results[i] 배열 → {products, options, supplements} 평탄화
+
+### 구현 내용 (파일별)
+
+#### extension/background.js (v3.4.0)
+- buildProductResult 반환값: { product: {...}, options: [...], supplements: [...] }
+  - product: 상품 공통 필드만 (optionGroup/optionName/optionPrice 제거)
+  - options[]: { productId, optionId, optionSeq, optionGroup1~3, optionName1~3, optionPrice, stockQuantity, registerDate, timestamp }
+  - supplements[]: { productId, optionId, optionSeq, optionGroup1, optionName1, optionPrice, stockQuantity, timestamp }
+- CSV 컬럼 3세트:
+  - PRODUCT_COLUMNS (25개): 상품 필드 (optionGroup/optionName/optionPrice 제거)
+  - OPTION_COLUMNS (13개): productId(FK) + 옵션 상세 (optionSeq 포함)
+  - SUPPLEMENT_COLUMNS (8개): productId(FK) + 추가상품 상세 (optionSeq 포함)
+  - buildCSV(data, columns): columns 파라미터 추가
+- runCollection 구조 변경:
+  - results[i] = { product, options, supplements } 또는 null
+  - flattenResults(): results → { products:[], options:[], supplements:[] }
+  - 중간/최종 저장 모두 flattenResults() 사용
+  - 무한 루프 내 makeError, SpecialStatus, 삭제캐시 모두 { product, options:[], supplements:[] } 형태
+- stopCollection: collectionResults = { products:[], options:[], supplements:[] } 구조로 반환
+- getResults, clearResults: 새 구조 사용
+- exportData 핸들러:
+  - JSON: 단일 파일 { products, options, supplements }, prefixProd + 타임스탬프
+  - CSV: 최대 3개 파일 개별 다운로드 (options/supplements가 없으면 해당 파일 생략)
+  - request.prefix, request.prefixOption, request.prefixSupplement 파라미터
+- autoExport: JSON 1파일 / CSV 3파일로 분기
+- sendSlackNotification: products 배열 기반 통계, 메시지에 옵션/추가상품 수 포함
+- onInstalled: collectionResults 초기값 { products:[], options:[], supplements:[] }
+- 버전 주석 헤더: v3.4.0, 변경 내용 섹션 추가
+
+#### extension/popup.html
+- 파일 접두어 입력 3개로 확장:
+  - id="exportPrefix" (상품, 기본값 "네이버상품")
+  - id="exportPrefixOption" (옵션, 기본값 "네이버옵션")
+  - id="exportPrefixSupplement" (추가상품, 기본값 "네이버추가상품")
+- .prefix-grid: 3-column CSS grid 레이아웃
+
+#### extension/popup.css
+- .prefix-grid: grid-template-columns: 1fr 1fr 1fr, gap 8px
+- .prefix-item: flex-direction column
+- .prefix-item .input-text:disabled: opacity 0.45, background #f5f5f5
+
+#### extension/popup.js
+- DOM 참조: exportPrefixOption, exportPrefixSupplement 추가
+- DOMContentLoaded: collectionResults = { products:[], options:[], supplements:[] } 구조 처리
+- exportBtn click: prefix, prefixOption, prefixSupplement 모두 전달
+- startPolling: collectionResults.products 배열 기반
+- 완료 메시지: products 배열 기반 통계
+- stopBtn: products 배열 기반 완료 메시지
+- renderResults:
+  - data.products 배열만 사용 (옵션 행 미리보기 제외)
+  - 통계: "3상품 (옵션 185 + 추가 0 = 188행) · 성공 3개"
+  - 재고수량 표시: item.stockQuantity (buildProductResult에서 합산된 값)
+  - 옵션명 표시 제거 (상품 단위이므로 옵션명 불필요)
+- saveExportSettings: prefix, prefixOption, prefixSupplement 3개 저장
+- updatePrefixDisabled(format): JSON이면 exportPrefixOption, exportPrefixSupplement disabled
+- loadSettingsTab: 3개 prefix 값 로드, updatePrefixDisabled 호출
+- DOMContentLoaded: updatePrefixDisabled 초기화 호출
+- clearResults: 직접 storage 접근 대신 sendMessage('clearResults') 사용
+- savedResultsInfo: products 개수 표시
+
+#### extension/manifest.json
+- version: 3.4.0
+
+### 데이터 구조 비교
+
+v3.3.0 (flat 배열):
+```
+collectionResults = [
+  { productId, productNo, optionId, mallNo, ..., optionGroup1, optionName1, stockQuantity, ... },
+  { productId, productNo, optionId, ... },  // 같은 상품의 다른 옵션
+  ...
+]
+```
+
+v3.4.0 (3종 분리):
+```
+collectionResults = {
+  products: [
+    { productId, productNo, mallNo, mallName, ..., stockQuantity(합산), status, ... }
+  ],
+  options: [
+    { productId, optionId, optionSeq, optionGroup1~3, optionName1~3, optionPrice, stockQuantity, registerDate, timestamp }
+  ],
+  supplements: [
+    { productId, optionId, optionSeq, optionGroup1, optionName1, optionPrice, stockQuantity, timestamp }
+  ]
+}
+```
+
+### CSV 파일 구조 비교
+
+v3.3.0: 1개 파일 (34컬럼, 옵션수만큼 행)
+v3.4.0: 3개 파일
+- 네이버상품_YYYYMMDDHHMMSS.csv: 25컬럼, 상품수만큼 행
+- 네이버옵션_YYYYMMDDHHMMSS.csv: 13컬럼, 옵션수만큼 행
+- 네이버추가상품_YYYYMMDDHHMMSS.csv: 8컬럼, 추가상품수만큼 행
+
+### JSON 파일 구조 비교
+
+v3.3.0: [{ productId, optionId, ...모든필드 }, ...]
+v3.4.0: { products:[...], options:[...], supplements:[...] }
+
+### 빌드 결과 (v3.4.0)
+- node build_min.js 실행 완료
+- background.js: 75.2KB → 314.2KB
+- popup.js: 33.9KB → 160.1KB
+- 합계: 원본 174.3KB → 난독화 후 530.4KB (+204%)
+
+---
+
+## 세션 20: 2026-03-09 - Slack CSV 3파일 전송 수정 (v3.4.1)
+
+### 문제 상황
+- v3.4.0에서 CSV 내려받기 시 상품/옵션/추가상품 3개 파일로 분리됨
+- 그러나 Slack 자동 전송 시에는 상품 CSV 1개만 전송되고 옵션/추가상품 CSV는 누락
+- JSON은 단일 파일 구조로 문제 없음
+
+### 원인 분석
+- `sendSlackNotification` 함수가 v3.3.0 기준으로 단일 파일 업로드 로직을 가지고 있었음
+- v3.4.0에서 CSV를 3개 파일로 분리하면서 다운로드(`chrome.downloads`)는 수정되었으나
+  Slack 업로드 코드는 여전히 `products` CSV 1개만 처리하는 구조로 남아있었음
+
+### 해결 방법
+
+#### uploadFileToSlack() 헬퍼 함수 추출
+기존 sendSlackNotification 내부의 3단계 업로드 로직(URL 획득 → 업로드 → 완료)을
+별도 헬퍼 함수로 추출하여 재사용 가능하게 변경:
+
+```javascript
+async function uploadFileToSlack(token, channel, fileBytes, fname, mimeType, initialComment) {
+  // Step 1: files.getUploadURLExternal
+  // Step 2: 파일 업로드 (multipart/form-data)
+  // Step 3: files.completeUploadExternal (initialComment 있을 때만 메시지 첨부)
+}
+```
+
+#### sendSlackNotification() CSV 분기 수정
+- JSON: 기존과 동일 (단일 파일 + 요약 메시지)
+- CSV: 
+  - 상품 CSV (항상) — 요약 메시지 첨부
+  - 옵션 CSV (options.length > 0 일 때만)
+  - 추가상품 CSV (supplements.length > 0 일 때만)
+  - 첫 번째 파일에만 summary 메시지 첨부, 나머지는 파일만 전송
+
+### 수행한 작업
+
+#### extension/background.js → v3.4.1
+- 헤더 주석 버전 v3.4.0 → v3.4.1
+- v3.4.1 변경 내역 블록 추가
+- `uploadFileToSlack(token, channel, fileBytes, fname, mimeType, initialComment)` 헬퍼 추가
+- `sendSlackNotification()` 리팩터링:
+  - prefixOpt, prefixSup 설정 로드 추가
+  - CSV 분기에서 상품 → 옵션 → 추가상품 순서로 uploadFileToSlack 3회 호출
+  - `[BG] Slack 전송 완료: CSV N개 파일` 로그
+- `onInstalled` 로그 v3.4.0 → v3.4.1
+
+#### extension/manifest.json → v3.4.1
+
+### 빌드 결과 (v3.4.1)
+- node build_min.js 실행 완료
+- background.js: 77.1KB → 294.5KB
+- popup.js: 33.9KB → 160.9KB
+- 합계: 원본 176.2KB → 난독화 후 516.6KB (+193%)
+
+### 설계 결정 사항
+- 첫 번째 파일(상품 CSV)에만 요약 메시지 첨부: Slack 채널에 메시지가 과도하게 쌓이지 않도록
+- 옵션/추가상품이 없을 때 해당 파일 전송 생략: 빈 CSV 파일 불필요 전송 방지
+- JSON은 이미 단일 파일에 3종 데이터 모두 포함이므로 수정 불필요
+
+### 미해결 문제
+- 없음 (단순 버그 수정)
+
+### 다음 단계
+- Chrome 확장 프로그램 재로드 후 Slack 전송 테스트
+- Service Worker 콘솔에서 `[BG] Slack 파일 전송 완료: 네이버옵션_...csv` 로그 확인
+
+---
+
+## 세션 21: 2026-03-09 - Slack CSV 단일 메시지 묶음 전송 (v3.4.2)
+
+### 문제 상황
+- v3.4.1에서 CSV 3개 파일을 Slack에 전송할 때 메시지가 3개로 분리되어 전송됨
+- 원인: uploadFileToSlack()이 completeUploadExternal을 각 파일마다 개별 호출했기 때문
+
+### 해결 방법
+Slack API `files.completeUploadExternal`의 `files` 인자가 배열로 여러 file_id를 받을 수 있음을 확인
+(공식 문서: `files` - Array of file ids and their corresponding optional titles)
+
+#### 처리 흐름 변경
+- 기존: getUploadURL → upload → complete (파일마다 반복) → 메시지 N개
+- 변경: (getUploadURL → upload) × N 후 → complete 1회(files 배열에 N개) → 메시지 1개
+
+#### 함수 구조 변경
+- `uploadFileToSlack()` 제거
+- `prepareSlackUpload(token, fileBytes, fname, mimeType)` 신규: URL 획득 + 바이너리 업로드 → `{id, title}` 반환
+- `completeSlackUpload(token, channel, fileEntries, initialComment)` 신규: file_id 배열을 한 번에 complete
+
+#### sendSlackNotification() CSV 분기
+```javascript
+const fileEntries = [];
+fileEntries.push(await prepareSlackUpload(token, prodBytes, ...));  // 상품 (항상)
+if (options.length > 0) fileEntries.push(await prepareSlackUpload(token, optBytes, ...));
+if (supps.length > 0)   fileEntries.push(await prepareSlackUpload(token, supBytes, ...));
+await completeSlackUpload(token, channel, fileEntries, summary);  // 1회 complete → 단일 메시지
+```
+
+### 수행한 작업
+
+#### extension/background.js → v3.4.2
+- 헤더 주석 v3.4.1 → v3.4.2, v3.4.2 변경 내역 추가
+- `uploadFileToSlack()` 삭제
+- `prepareSlackUpload()` 추가 (2단계: URL 획득 + 업로드)
+- `completeSlackUpload()` 추가 (files 배열 complete)
+- `sendSlackNotification()` CSV 분기 수정: prepare x N → complete 1회
+- `onInstalled` 로그 v3.4.2
+
+#### extension/manifest.json → v3.4.2
+
+### 빌드 결과 (v3.4.2)
+- node build_min.js 실행 완료
+- background.js: 78.0KB → 308.6KB
+- popup.js: 33.9KB → 168.0KB
+- 합계: 원본 177.1KB → 난독화 후 531.0KB (+200%)
+
+### 설계 결정 사항
+- Slack API는 completeUploadExternal의 files 배열에 여러 항목을 담으면 단일 메시지에 모든 파일 첨부
+- JSON은 단일 파일이므로 prepare + complete 1회로 처리 (기존과 동일한 로직, 함수만 교체)
+- 옵션/추가상품이 없을 때 해당 파일 준비 생략: fileEntries에 포함 안 함
+
+### 미해결 문제
+- 없음
+
+### 다음 단계
+- Chrome 확장 프로그램 재로드 후 Slack 전송 테스트
+- Service Worker 콘솔에서 `[BG] Slack CSV 3개 파일 단일 메시지 전송 완료` 확인
+
+---
+
+## 세션 22: 2026-03-09 - 설정 내보내기/불러오기 + 기본 URL 파일 자동 갱신 (v3.4.3)
+
+### 요청 내용
+1. 설정을 파일로 내보내고 일괄 불러오기 기능 추가 (확장 프로그램 업데이트 후 설정 유지)
+2. 하위 버전 설정 파일도 항목명이 같으면 호환 적용
+3. 기본 URL 파일을 수동 수정해도 팝업 열 때마다 최신 내용 자동 로드
+4. 버전 3.4.3
+
+### 설계 결정 사항
+
+#### 설정 내보내기/불러오기
+- 내보내기 대상: proxyConfig, exportSettings, delayConfig, scheduleConfig, slackConfig, defaultFileName
+- 제외: collectionResults(결과 데이터), defaultFileContent(용량 큼), 캐시성 데이터
+- JSON 파일에 `_version`, `_exportedAt` 메타 필드 포함 (불러올 때는 무시)
+- 하위 호환: setAllSettings 핸들러가 항목명 기준으로 존재하는 것만 적용 → 항목명이 변경되지 않으면 버전 달라도 동작
+
+#### 기본 URL 파일 자동 갱신
+- **문제**: chrome.storage에 content 저장 방식은 파일 수동 수정 시 outdated
+- **해결**: File System Access API (`showOpenFilePicker`) + IndexedDB (`fileHandle` 보관)
+  - 팝업 열릴 때 `fileHandle.getFile()` 호출 → 항상 최신 내용 읽음
+  - `queryPermission({ mode: 'read' })` === 'granted' 인 경우에만 자동 읽기 (사용자 제스처 불필요)
+  - API 미지원 or 권한 없음 → chrome.storage fallback (기존 동작 유지)
+- **IndexedDB 선택 이유**: FileSystemFileHandle은 structured clone 가능 → chrome.storage 불가 (직렬화 안 됨)
+
+### 수행한 작업
+
+#### extension/background.js → v3.4.3
+- 헤더 주석 v3.4.2 → v3.4.3, v3.4.3 변경 내역 추가
+- `getAllSettings` 핸들러 추가: 5종 설정 일괄 반환
+- `setAllSettings` 핸들러 추가: 존재하는 항목만 적용, 런타임 변수 즉시 갱신
+- `onInstalled` 로그 v3.4.3
+
+#### extension/popup.html → v3.4.3
+- 설정 탭 '저장된 결과' 섹션 위에 '설정 관리' 섹션 추가
+  - `📤 설정 내보내기` 버튼
+  - `📥 설정 불러오기` 버튼 + hidden file input
+
+#### extension/popup.js → v3.4.3
+- DOM 참조: `exportConfigBtn`, `importConfigBtn`, `importConfigInput` 추가
+- `tryLoadDefaultFile()` 완전 재작성:
+  - `openHandleDB()`, `saveFileHandle()`, `loadFileHandle()` IndexedDB 헬퍼 추가
+  - File System Access API 지원 시: handle 로드 → queryPermission → getFile() → 최신 내용 읽기
+  - 미지원/권한없음 시: `_tryLoadDefaultFileLegacy()` fallback
+- `selectDefaultFileBtn` 이벤트: `showOpenFilePicker` 우선 사용 → handle 저장 → legacy fallback
+- `exportConfigBtn` 이벤트: getAllSettings → JSON Blob → 다운로드
+- `importConfigBtn` / `importConfigInput` 이벤트: 파일 읽기 → setAllSettings → loadSettingsTab() 재로드
+
+#### extension/manifest.json → v3.4.3
+
+### 빌드 결과 (v3.4.3)
+- node build_min.js 실행 완료
+- background.js: 80.9KB → 315.4KB
+- popup.js: 39.9KB → 181.6KB
+- 합계: 원본 186.7KB → 난독화 후 552.5KB (+196%)
+
+### 주의 사항
+- File System Access API: Chrome 86+ 지원. 확장 프로그램 팝업에서는 지원되나 사용자 제스처(클릭) 없이 자동 권한 요청 불가
+  → `queryPermission` 으로 기존에 허용된 것만 자동 재로드 (처음 선택 시 사용자가 클릭하므로 자동 허용)
+- 설정 불러오기 시 슬랙 토큰은 password 필드 → 평문 JSON으로 저장됨 (로컬 파일이므로 관리 주의)
+
+### 미해결 문제
+- 없음
+
+### 다음 단계
+- Chrome 확장 프로그램 재로드 후 테스트:
+  1. 설정 탭 → '📤 설정 내보내기' → JSON 파일 확인
+  2. 확장 프로그램 재설치 후 '📥 설정 불러오기' → 설정 복원 확인
+  3. 기본 URL 파일 선택 → 파일 외부에서 수정 → 팝업 재오픈 → 최신 내용 반영 확인
+
+---
+
+## 세션 23: 2026-03-09 - 기본 URL 파일 절대경로 저장/복원 (v3.4.4)
+
+### 요청 내용
+- 설정 내보내기 파일에 defaultFileName(파일명만) 포함되는데, 파일명만으로는 위치 추정 불가
+- 절대경로도 함께 저장하고 불러오도록 수정
+- 버전 3.4.4
+
+### 설계 결정
+
+#### 절대경로 자동 추출 가능 여부
+- FSA API (`showOpenFilePicker`): 보안 정책상 FileSystemFileHandle에 절대경로 없음
+- legacy `input[type=file]`: `file.path` → 일반 브라우저/크롬 확장 팝업에서는 undefined (Electron 전용)
+- **결론**: 자동 추출 불가 → 사용자가 직접 입력하는 경로 필드 추가
+
+#### 구현 방식
+- `defaultFilePathInput` (text) 필드를 설정 탭 기본 URL 파일 카드에 추가
+- 파일 선택(FSA) 시: 기존 경로의 파일명과 새로 선택한 파일명 비교 → 다르면 경로 초기화
+- 파일 선택(legacy input) 시: `file.path || ''` → 자동 기록 (환경에 따라)
+- 경로 직접 편집 후 포커스 아웃(`change`) → chrome.storage 즉시 저장
+- 설정 내보내기/불러오기에 `defaultFilePath` 포함
+
+### 수행한 작업
+
+#### extension/popup.html
+- 기본 URL 파일 카드: `defaultFilePathInput` (text) 추가
+
+#### extension/popup.js
+- DOM 참조: `defaultFilePathInput` 추가
+- `loadSettingsTab()`: `defaultFilePath` 읽어 경로 필드에 표시
+- `selectDefaultFileBtn` 핸들러: 파일명 불일치 시 경로 필드/storage 초기화
+- `defaultFileInput` 핸들러: `file.path` 있으면 경로 자동 기록
+- `defaultFilePathInput change` 이벤트 추가 → chrome.storage 즉시 저장
+
+#### extension/background.js → v3.4.4
+- `getAllSettings`: `defaultFilePath` 추가, `_version: '3.4.4'`
+- `setAllSettings`: `defaultFilePath` 복원 처리 추가
+- 헤더/onInstalled 로그 v3.4.4 업데이트
+
+#### extension/manifest.json → v3.4.4
+
+### 빌드 결과 (v3.4.4)
+- node build_min.js 실행 완료
+- background.js: 81.6KB → 346.1KB
+- popup.js: 41.1KB → 185.9KB
+- 합계: 원본 189.0KB → 난독화 후 587.4KB (+211%)
+
+### 다음 단계
+- Chrome 확장 프로그램 재로드 후 테스트:
+  1. 설정 탭 → 기본 URL 파일 카드에서 파일 선택 후 경로 필드에 절대경로 직접 입력
+  2. '📤 설정 내보내기' → JSON에 defaultFilePath 포함 확인
+  3. 재설치 후 '📥 설정 불러오기' → 경로 필드 복원 확인
+
+---
+
+## 세션 24: 2026-03-09 - 경로 필드 위치 개선 + 알림 한글화 (v3.4.5)
+
+### 요청 내용
+1. 모든 사용자에게 절대경로 직접 입력을 노출하는 것은 보기 안 좋음
+   → 설정 내보내기가 필요한 경우에만 쓰는 필드이므로 설정 관리 카드 안으로 이동
+2. 설정 불러오기 완료 알림에 영어 변수명 노출 (proxyConfig, exportSettings 등) → 한글 명칭으로 변경
+3. 버전 3.4.5
+
+### 수행한 작업
+
+#### extension/popup.html
+- 기본 URL 파일 카드: 경로 입력 필드 제거 (힌트 문구도 원래대로 복원)
+- 설정 관리 카드: 기존 버튼 아래에 경로 입력 필드 배치
+  - 라벨: "📄 기본 URL 파일 절대경로 (설정 내보내기에 포함됩니다)"
+  - 안내문: "설정을 내보낼 때 기본 URL 파일의 위치를 함께 저장하려면 절대경로를 입력하세요."
+
+#### extension/popup.js
+- `importConfigInput` 이벤트 핸들러: applied 키 한글 매핑 추가
+  - proxyConfig → 프록시, exportSettings → 내보내기, delayConfig → 딜레이
+  - scheduleConfig → 스케줄, slackConfig → Slack
+  - defaultFileName → 기본 파일명, defaultFilePath → 기본 파일경로
+
+#### extension/background.js → v3.4.5
+- 헤더 v3.4.5 변경 내역 추가, _version 3.4.5, onInstalled 로그 v3.4.5
+
+#### extension/manifest.json → v3.4.5
+
+### 빌드 결과 (v3.4.5)
+- node build_min.js 실행 완료
+- background.js: 82.0KB → 333.1KB
+- popup.js: 41.5KB → 202.8KB
+- 합계: 원본 190.1KB → 난독화 후 592.0KB (+211%)
+
+---
+
+## 세션 25: 2026-03-09 - 설정 불러오기 후 URL 0개 문제 근본 해결 (v3.4.6)
+
+### 문제 상황
+- v3.4.5에서 설정 불러오기 완료 후 수집 탭에 여전히 "0개 URL 인식됨"
+- 기존 설정 파일(v3.4.5)에 defaultFilePath는 있지만 defaultFileContent 없음
+
+### 근본 원인 분석
+- `getAllSettings` 내보내기 대상에 `defaultFileContent`가 빠져 있었음
+- `setAllSettings` 불러오기에서도 `defaultFileContent` 복원 처리 없음
+- `_tryLoadDefaultFileLegacy()`는 `chrome.storage.local.defaultFileContent`를 읽는데,
+  설정 불러오기 후엔 이 값이 비어있어 URL 0개 표시
+- FSA API handle(IndexedDB)도 재설치 후엔 없으므로 양쪽 모두 빈 결과
+
+### 해결 방법
+- `getAllSettings`: `defaultFileContent` 키 추가 → 설정 파일에 URL 목록 실제 내용 포함
+- `setAllSettings`: `defaultFileContent` 복원 처리 추가 → chrome.storage에 URL 내용 저장
+- `importConfigInput` 핸들러: `setAllSettings` 후 `settings.defaultFileContent`가 있으면
+  수집 탭 `urlInput.value`에 즉시 반영 + `refreshCount()` 호출
+- 팝업 닫고 재오픈 시에도 `_tryLoadDefaultFileLegacy()`가 저장된 내용 자동 로드
+
+### 수행한 작업
+
+#### extension/background.js → v3.4.6
+- `getAllSettings` keys 배열에 `defaultFileContent` 추가
+- 반환 객체에 `defaultFileContent: stored.defaultFileContent || ''` 추가
+- `_version: '3.4.6'`
+- `setAllSettings`에 `defaultFileContent` 복원 조건 추가
+- 헤더 v3.4.6 변경 내역 추가, onInstalled 로그 v3.4.6
+
+#### extension/popup.js → v3.4.6
+- `importConfigInput` 핸들러: `setAllSettings` 완료 후 `defaultFileContent` 있으면 즉시 수집 탭 반영
+- KEY_LABEL에 `defaultFileContent: '기본 파일내용'` 추가
+
+#### extension/manifest.json → v3.4.6
+
+### 검증 (Python 시뮬레이션)
+- `url-test.txt` 3개 URL 포함 테스트 설정 파일 생성
+- `setAllSettings` 로직 시뮬레이션: `defaultFileContent` [155 chars] 정상 저장 확인
+- `importConfigInput` 로직 시뮬레이션: 3개 URL 인식 확인
+- 알림 메시지: `✅ 설정 불러오기 완료 (v3.4.6): 프록시, 내보내기, 딜레이, 스케줄, Slack, 기본 파일명, 기본 파일경로, 기본 파일내용`
+- 테스트 파일 위치: `<Downloads 경로>\nsp-extractor-config_test346.json`
+
+### 빌드 결과 (v3.4.6)
+- node build_min.js 실행 완료
+- background.js: 82.7KB → 329.7KB
+- popup.js: 41.9KB → 192.2KB
+- 합계: 원본 191.2KB → 난독화 후 580.4KB (+204%)
+
+### 이후 동작 흐름
+1. 📤 설정 내보내기 → JSON에 `defaultFileContent`(URL 목록 전체) 포함
+2. 확장 프로그램 재설치 (chrome.storage 초기화)
+3. 📥 설정 불러오기 → `defaultFileContent` chrome.storage에 저장
+4. 수집 탭 URL 입력란에 즉시 N개 URL 표시
+5. 팝업 닫고 재오픈 → `_tryLoadDefaultFileLegacy()`가 저장된 내용 자동 로드
+
+---
+
+## 세션 26: v3.4.7 - 설정 파일에서 defaultFileContent/defaultFileName 제거
+
+### 배경 및 문제 인식
+- v3.4.6에서 defaultFileContent(URL 목록 전체)를 설정 JSON에 포함하는 방식 채택
+- 사용자가 근본적 문제를 지적:
+  1. URL 1000개 이상이면 JSON 수십KB -> 설정 파일 비대화
+  2. 파일 내용이 변경돼도 스냅샷이라 반영 안 됨
+  3. defaultFileContent + defaultFilePath 둘 다 있으면 중복
+
+### 결정 사항
+- 설정 파일 포함: defaultFilePath (절대경로) 만
+- 설정 파일 제외: defaultFileName, defaultFileContent
+- defaultFileContent는 chrome.storage 런타임 키로 유지 (레거시 fallback, 스케줄 수집용)
+- 설정 불러오기 후 defaultFilePath 있으면 파일 재선택 안내 메시지 표시
+
+### 수정 파일
+- background.js: getAllSettings/setAllSettings에서 defaultFileName/defaultFileContent 제거, v3.4.7
+- popup.js: importConfigInput 핸들러 스냅샷 반영 블록 제거, KEY_LABEL 정리, 재선택 안내 메시지
+- manifest.json: 3.4.7
+
+### 빌드 결과 (v3.4.7)
+- background.js: 82.8KB -> 339.1KB
+- popup.js: 41.6KB -> 202.3KB
+- 합계: 191.0KB -> 596.5KB (+212%)
+
+---
+
+## 세션 27: v3.4.8 - 데이터 필드 null 통일 및 salesPrice 폴백 로직 추가
+
+### 배경 및 수정 사항
+- 응답 결과의 빈 필드 타입을 일관성 있게 관리하기 위해 빈 문자열 대신 null 사용
+- 할인을 하지 않는 상품의 경우 discountedSalePrice가 없을 수 있으므로, 이 경우 price 값을 salesPrice로 사용하도록 개선
+
+### 상세 작업 내용
+
+#### extension/background.js -> v3.4.8
+- buildProductResult 내 baseProduct 및 오류 객체 생성 시 빈 문자열('') 대신 null 사용하도록 수정
+- salesPrice 결정 로직 수정: (discountedSalePrice || price) 패턴 적용
+- nn() 헬퍼 함수를 통한 null safety 강화
+- _version: '3.4.8' 업데이트 및 헤더 changelog 기록
+
+#### extension/manifest.json -> 3.4.8
+- 버전 번호를 3.4.8로 업데이트
+
+### 결과 분석
+- API 응답 결과에서 값이 없는 항목(brandId, brandName, reviewCount 등)이 모두 null로 반환됨 확인
+- 할인 적용 여부와 관계없이 salesPrice 필드에 유효한 가격 정보가 포함됨
+
+### 특이 사항
+- 사용자 시스템 문제(채팅창 미표시 버그)로 인해 allow가 필요한 빌드 단계(node build_min.js)는 이번 세션에서 건너뜀
