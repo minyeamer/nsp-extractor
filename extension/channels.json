@@ -1503,5 +1503,45 @@
     "channelUid": "2sWDwErHNx2RgOxLI82a6",
     "isBrand": true,
     "mallSeq": 518684
+  },
+  "maxmade": {
+    "channelUid": "2sWDzapANhjcdJLJl6mhk",
+    "isBrand": false,
+    "mallSeq": 2419138
+  },
+  "kidsten": {
+    "channelUid": "2sWE0jNUU4B0SUdV6apPR",
+    "isBrand": true,
+    "mallSeq": 4700444
+  },
+  "sirloin": {
+    "channelUid": "2sWDwfcUMHQc0rtCUvNpc",
+    "isBrand": true,
+    "mallSeq": 630150
+  },
+  "theralab": {
+    "channelUid": "2sWDzMfG8hYBjmw8f77Fq",
+    "isBrand": false,
+    "mallSeq": 1992978
+  },
+  "movita": {
+    "channelUid": "2sWDvRJ64yordHknD6pnE",
+    "isBrand": true,
+    "mallSeq": 197812
+  },
+  "apharmhealth": {
+    "channelUid": "2sWDvj6BRTDSo36rvW2mD",
+    "isBrand": true,
+    "mallSeq": 315534
+  },
+  "echonutrition": {
+    "channelUid": "2sWDxttRWh3uBonFvfqKJ",
+    "isBrand": false,
+    "mallSeq": 930875
+  },
+  "spatone_kr": {
+    "channelUid": "2sWDyuXvTYwQ26eUsiLZF",
+    "isBrand": true,
+    "mallSeq": 1227604
   }
 }
