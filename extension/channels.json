@@ -1543,5 +1543,55 @@
     "channelUid": "2sWDyuXvTYwQ26eUsiLZF",
     "isBrand": true,
     "mallSeq": 1227604
+  },
+  "lacfido": {
+    "channelUid": "2zKzdhPVgyeQjRHSAGSlT",
+    "isBrand": false,
+    "mallSeq": 12218150
+  },
+  "pharmsville": {
+      "channelUid": "2sWDvO6ikkiNWfI7L4cKO",
+      "isBrand": false,
+      "mallSeq": 164407
+    },
+  "purerang": {
+      "channelUid": "2sWDvlOJB5fVpNlUiv4om",
+      "isBrand": false,
+      "mallSeq": 327083
+    },
+  "dodreamstore": {
+      "channelUid": "2sWDwd2QScXy9kAVeI4lL",
+      "isBrand": false,
+      "mallSeq": 616432
+    },
+  "awesomeofficial": {
+    "channelUid": "2sWDvXXtpxEUczwHgWOl3",
+    "isBrand": false,
+    "mallSeq": 237187
+  },
+  "ildong": {
+    "channelUid": "2sWDxcul382WQdUPOp4Hf",
+    "isBrand": true,
+    "mallSeq": 856114
+  },
+  "ournutrimall": {
+    "channelUid": "2usercMYaD0oscSmQEcDV",
+    "isBrand": false,
+    "mallSeq": 9907895
+  },
+  "purezen_": {
+    "channelUid": "2zfT2Ptk5y2dkdMhroZt4",
+    "isBrand": false,
+    "mallSeq": 12251281
+  },
+  "regenelkorea": {
+    "channelUid": "31OJTMRWSvPByMKX3wmMs",
+    "isBrand": false,
+    "mallSeq": 12398876
+  },
+  "gmpharm": {
+    "channelUid": "2sWDvxWx7d3tCEpuDM90E",
+    "isBrand": true,
+    "mallSeq": 401368
   }
 }
